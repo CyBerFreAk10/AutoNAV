@@ -14,6 +14,10 @@ API
   POST /api/maps/<m>/go    {"route"|"name", "set_initial_pose", "load_map"}
   POST /api/nav/cancel
   POST /api/maps/save      {"name"}       save the live /map with nav2 map_saver_cli
+  GET  /api/live/image                    live SLAM /map as PNG (meta is in /api/state)
+  POST /api/explorer/start {"name"}       start autonomous mapping (optional map name)
+  POST /api/explorer/stop
+  POST /api/localize                      run global localization now
 """
 import io
 import json
@@ -33,14 +37,18 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateThroughPoses
 from nav2_msgs.srv import LoadMap
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
+import numpy as np
 from PIL import Image
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_msgs.msg import Bool, Float32, Int8MultiArray, Int16MultiArray, String
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 
 NAME_RE = re.compile(r'^[A-Za-z0-9_\-]{1,64}$')
@@ -71,7 +79,14 @@ class Dashboard(Node):
             'pose': None,
             'nav': {'state': 'idle', 'detail': '', 'route': None, 'map': None},
             'nodes': [],
+            'explorer': None,          # last /explorer/state JSON
+            'loc_score': None,
+            'live_map': None,          # meta of the latest /map
+            'explorer_path': [],
+            'explorer_boundary': [],
         }
+        self.live_msg = None
+        self._live_png = (None, None)
         self.rx = deque(maxlen=12)
 
         tof = self.s['tof']
@@ -94,6 +109,19 @@ class Dashboard(Node):
             tof_set('nearest', lambda m: None if math.isinf(m.data) else round(m.data, 3)), 10)
         self.create_subscription(String, 'rover/sent', self._on_sent, 10)
         self.create_subscription(String, 'rover/esp32_rx', self._on_rx, 10)
+        self.create_subscription(String, 'explorer/state', self._on_explorer, 10)
+        self.create_subscription(Float32, 'localization/score', self._on_score, 10)
+        map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, 'map', self._on_map, map_qos)
+        self.create_subscription(Path, 'explorer/path', lambda m: self._on_path('explorer_path', m),
+                                 map_qos)
+        self.create_subscription(Path, 'explorer/boundary',
+                                 lambda m: self._on_path('explorer_boundary', m), map_qos)
+        self.cli_explore_start = self.create_client(Trigger, 'explorer/start')
+        self.cli_explore_stop = self.create_client(Trigger, 'explorer/stop')
+        self.cli_localize = self.create_client(Trigger, 'localization/global_localize')
+        self.cli_explorer_params = self.create_client(SetParameters, 'explorer/set_parameters')
 
         self.pub_cmd = self.create_publisher(String, 'rover/cmd', 10)
         self.pub_init = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
@@ -119,6 +147,89 @@ class Dashboard(Node):
     def _on_rx(self, m):
         with self.lock:
             self.rx.append([time.strftime('%H:%M:%S'), m.data])
+
+    def _on_explorer(self, m):
+        try:
+            st = json.loads(m.data)
+        except ValueError:
+            return
+        st['stamp'] = time.time()
+        with self.lock:
+            self.s['explorer'] = st
+
+    def _on_score(self, m):
+        with self.lock:
+            self.s['loc_score'] = round(float(m.data), 3)
+
+    def _on_map(self, m):
+        o = m.info.origin.position
+        with self.lock:
+            self.live_msg = m
+            self.s['live_map'] = {'width': m.info.width, 'height': m.info.height,
+                                  'resolution': m.info.resolution, 'origin': [o.x, o.y, 0.0],
+                                  'stamp': time.time()}
+
+    def _on_path(self, key, m):
+        pts = [[round(p.pose.position.x, 3), round(p.pose.position.y, 3)] for p in m.poses]
+        if len(pts) > 600:
+            pts = pts[::len(pts) // 600 + 1] + [pts[-1]]
+        with self.lock:
+            self.s[key] = pts
+
+    def live_png(self):
+        with self.lock:
+            m = self.live_msg
+        if m is None:
+            raise FileNotFoundError('no live /map yet (is slam_toolbox running?)')
+        if self._live_png[0] is m:
+            return self._live_png[1]
+        d = np.array(m.data, dtype=np.int16).reshape(m.info.height, m.info.width)
+        img = np.full(d.shape, 205, np.uint8)                     # unknown = grey
+        known = d >= 0
+        img[known] = (254 - np.clip(d[known], 0, 100) * 2.54).astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(np.flipud(img)).save(buf, 'PNG')
+        self._live_png = (m, buf.getvalue())
+        return self._live_png[1]
+
+    def _call(self, client, req, what, timeout=5.0):
+        if not client.wait_for_service(timeout_sec=1.0):
+            raise RuntimeError(f'{what} is not running')
+        fut = client.call_async(req)
+        end = time.time() + timeout
+        while not fut.done() and time.time() < end:
+            time.sleep(0.02)
+        if not fut.done():
+            raise RuntimeError(f'{what} did not answer')
+        return fut.result()
+
+    def explorer_start(self, name=''):
+        if name:
+            if not NAME_RE.match(name):
+                raise ValueError('map name: letters, numbers, _ and - only')
+            req = SetParameters.Request()
+            req.parameters = [Parameter(name='map_name', value=ParameterValue(
+                type=ParameterType.PARAMETER_STRING, string_value=name))]
+            self._call(self.cli_explorer_params, req, 'explorer')
+        r = self._call(self.cli_explore_start, Trigger.Request(), 'explorer')
+        return r.message
+
+    def explorer_stop(self):
+        r = self._call(self.cli_explore_stop, Trigger.Request(), 'explorer')
+        self.drive('x')
+        return r.message
+
+    def localize(self):
+        r = self._call(self.cli_localize, Trigger.Request(), 'global_localizer', timeout=30.0)
+        if not r.success:
+            raise RuntimeError(r.message)
+        return r.message
+
+    def exploring(self):
+        with self.lock:
+            st = self.s['explorer']
+        return bool(st and time.time() - st['stamp'] < 2.0
+                    and st.get('state') not in ('IDLE', 'DONE', 'STOPPED'))
 
     def _update_pose(self):
         try:
@@ -392,8 +503,19 @@ def make_handler(node, web_dir):
                     c = str(self._body().get('c', '')).lower()
                     if c not in VALID_CMDS:
                         return self._send(400, {'error': 'c must be one of w s a d x'})
+                    if node.exploring():   # manual input overrides autonomous mapping
+                        node.explorer_stop()
                     node.drive(c)
                     return self._send(200, {'ok': True})
+                if method == 'GET' and api == ['live', 'image']:
+                    return self._send(200, node.live_png(), 'image/png')
+                if method == 'POST' and api == ['explorer', 'start']:
+                    return self._send(200, {'result': node.explorer_start(
+                        str(self._body().get('name', '')).strip())})
+                if method == 'POST' and api == ['explorer', 'stop']:
+                    return self._send(200, {'result': node.explorer_stop()})
+                if method == 'POST' and api == ['localize']:
+                    return self._send(200, {'result': node.localize()})
                 if method == 'GET' and api == ['maps']:
                     return self._send(200, {'maps': node.list_maps(), 'dir': node.maps_dir})
                 if method == 'POST' and api == ['maps', 'save']:
@@ -451,6 +573,15 @@ def main(args=None):
     httpd = ThreadingHTTPServer((node.host, node.port), make_handler(node, web_dir))
     httpd.daemon_threads = True
     node.get_logger().info(f'Dashboard on http://{node.host}:{node.port}  (maps: {node.maps_dir})')
+
+    def stop_http_when_ros_stops():
+        # rclpy handles SIGINT/SIGTERM by shutting down its context; stop the web server then
+        # too, otherwise the process would keep serving (and never exit under systemd/launch).
+        while rclpy.ok():
+            time.sleep(0.3)
+        httpd.shutdown()
+
+    threading.Thread(target=stop_http_when_ros_stops, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

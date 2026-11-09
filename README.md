@@ -11,17 +11,19 @@ AutoNav is a fully autonomous ground vehicle designed for comprehensive warehous
 5. [ROS 2 Workspace](#ros-2-workspace)
 6. [Installation](#installation)
 7. [Quick Start](#quick-start)
-8. [Package Reference](#package-reference)
+8. [Autonomous Mapping](#autonomous-mapping)
+9. [Package Reference](#package-reference)
+   - [rover_bringup - one-command bring-up](#rover_bringup---one-command-bring-up)
    - [vl53l5cx_ros - ToF sensor, obstacle & cliff detection](#vl53l5cx_ros---tof-sensor-obstacle--cliff-detection)
    - [rover_control - ESP32 bridge & teleop](#rover_control---esp32-bridge--teleop)
    - [rover_dashboard - web dashboard](#rover_dashboard---web-dashboard)
    - [rover_nav - mapping, localization, exploration](#rover_nav---mapping-localization-exploration)
-9. [Topics, Services & Frames](#topics-services--frames)
-10. [Hardware Bring-up Checklist](#hardware-bring-up-checklist)
-11. [Simulation & Test Results](#simulation--test-results)
-12. [Troubleshooting](#troubleshooting)
-13. [Development Workflow](#development-workflow)
-14. [Roadmap](#roadmap)
+10. [Topics, Services & Frames](#topics-services--frames)
+11. [Hardware Bring-up Checklist](#hardware-bring-up-checklist)
+12. [Simulation & Test Results](#simulation--test-results)
+13. [Troubleshooting](#troubleshooting)
+14. [Development Workflow](#development-workflow)
+15. [Roadmap](#roadmap)
 
 ---
 
@@ -31,6 +33,7 @@ AutoNav is a fully autonomous ground vehicle designed for comprehensive warehous
 
 *   **Hardware Interface:** ESP32 firmware complete (L298N motor control, ICM-20948 IMU stream, watchdog).
 *   **ROS 2 stack:** Sensor drivers, ESP32 serial bridge, web dashboard, lidar odometry, SLAM, global localization and an autonomous boundary-first explorer are implemented.
+*   **Autonomous mapping:** one-command bring-up (`rover_bringup`), started and monitored from the dashboard (live map, start/stop), optional start at boot.
 *   **Simulation:** Full mapping, localization and exploration pipeline validated in the built-in 2D simulator (results [below](#simulation--test-results)).
 *   **Next:** First autonomous runs on the physical rover (see the [bring-up checklist](#hardware-bring-up-checklist)).
 *   **Methodology:** Block diagrams completed for hardware integration, SLAM processing and path planning.
@@ -143,6 +146,7 @@ AutoNAV/
     ├── rover_control/             ESP32 serial bridge + laptop keyboard teleop
     ├── rover_dashboard/           Web dashboard (port 8080)
     ├── rover_nav/                 Lidar odometry, SLAM configs, global localizer, explorer, simulator
+    ├── rover_bringup/             One-command autonomous mapping launch, serial-port setup, boot service
     └── ydlidar_ros2_driver/       Upstream YDLidar driver (git submodule)
 ```
 
@@ -152,6 +156,7 @@ AutoNAV/
 | `rover_control` | `esp32_bridge`, `rover_teleop` |
 | `rover_dashboard` | `dashboard` |
 | `rover_nav` | `laser_odometry`, `global_localizer`, `explorer`, `rover_sim` |
+| `rover_bringup` | `autonomous_mapping.launch.py`, `setup_serial_ports`, `scripts/install_service.sh` |
 | `ydlidar_ros2_driver` | `ydlidar_ros2_driver_node` (X4 settings in `rover_nav/config/ydlidar_x4.yaml`) |
 
 ---
@@ -178,6 +183,9 @@ sudo usermod -aG dialout,i2c $USER
 # 5. Build
 cd ~/autonav_ws && source /opt/ros/jazzy/setup.bash && colcon build
 echo "source ~/autonav_ws/install/setup.bash" >> ~/.bashrc
+
+# 6. Fixed serial port names (plug in BOTH the ESP32 and the lidar first)
+ros2 run rover_bringup setup_serial_ports --install   # -> /dev/rover_esp32, /dev/rover_lidar
 ```
 
 `vl53l5cx-ctypes` and `smbus2` must be installed for the **system** Python (`/usr/bin/python3`), which ROS uses - not a virtualenv.
@@ -207,7 +215,14 @@ If the laptop cannot see the Pi's topics, check the firewall (`sudo ufw disable`
 
 ## Quick Start
 
-Each line in its own terminal on the Pi (after `source ~/autonav_ws/install/setup.bash`):
+**Autonomous mapping (everything in one command):**
+
+```bash
+ros2 launch rover_bringup autonomous_mapping.launch.py
+# open http://<pi-ip>:8080 -> "Autonomous mapping" -> Start
+```
+
+See [Autonomous Mapping](#autonomous-mapping) for details. To run parts individually, each line in its own terminal on the Pi (after `source ~/autonav_ws/install/setup.bash`):
 
 ```bash
 ros2 launch rover_control esp32_bridge.launch.py          # motors + IMU
@@ -232,7 +247,67 @@ ROS_DOMAIN_ID=99 ros2 launch rover_nav mapping.launch.py sim:=true explore:=true
 
 ---
 
+## Autonomous Mapping
+
+### 1. One-time setup
+
+1. Complete the [bring-up checklist](#hardware-bring-up-checklist) (lidar orientation, rover speeds, ToF film).
+2. Give the serial devices fixed names (both plugged in, keep them in the same USB sockets afterwards):
+   ```bash
+   ros2 run rover_bringup setup_serial_ports            # shows which device is which
+   ros2 run rover_bringup setup_serial_ports --install  # writes /etc/udev/rules.d/99-autonav-serial.rules
+   ```
+   It listens to each device: the one printing `#` lines / IMU CSV at 115200 baud is the ESP32, the other the lidar. Until this is done the launch falls back to `/dev/ttyUSB0` (ESP32) and `/dev/ydlidar` (lidar), which can collide.
+3. Optional - start the stack at boot:
+   ```bash
+   bash ~/autonav_ws/src/rover_bringup/scripts/install_service.sh          # install + start
+   bash ~/autonav_ws/src/rover_bringup/scripts/install_service.sh --remove # uninstall
+   journalctl -u autonav -f                                                 # logs
+   ```
+   The rover does **not** drive at boot - it waits for *Start* in the dashboard.
+
+### 2. Run
+
+```bash
+ros2 launch rover_bringup autonomous_mapping.launch.py               # wait for Start in the dashboard
+ros2 launch rover_bringup autonomous_mapping.launch.py explore:=true # start exploring immediately
+ros2 launch rover_bringup autonomous_mapping.launch.py continue_map:=warehouse   # extend a saved map
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `explore` | `false` | start exploring immediately instead of waiting for *Start* |
+| `map_name` | `""` | name of the saved map (`explored_<date>` if empty; also settable in the dashboard) |
+| `continue_map` | `""` | find the robot in this saved map and keep extending it |
+| `maps_dir` | `~/maps` | where maps are saved |
+| `tof` | `true` | run the ToF sensor and let the explorer react to cliffs / low obstacles |
+| `dashboard` | `true` | run the web dashboard |
+| `esp32_port`, `lidar_port` | `""` | override the serial ports |
+
+Started nodes: ESP32 bridge, YDLidar driver, `laser_odometry`, slam_toolbox, `explorer`, VL53L5CX + hazard detection, dashboard.
+
+### 3. Monitor and control from the dashboard
+
+* **Autonomous mapping panel**: explorer state and progress, optional map name, **Start** / **Stop**, **Localize now**, localization fit.
+* **● Live SLAM map** (first entry of the map list): the map being built, refreshed every 2 s, with the robot, the closed boundary loop (green) and the explorer's planned path (orange, dashed).
+* **Manual override**: any drive command (buttons, W A S D, Stop) stops the explorer first.
+* When exploration finishes, the map (image + pose graph) is saved to `~/maps/<name>` and appears in the map list, ready for routes and `localization.launch.py`.
+
+The same from the command line: `ros2 service call /explorer/start std_srvs/srv/Trigger`, `/explorer/stop`, `ros2 param set /explorer map_name warehouse`, `ros2 topic echo /explorer/state`.
+
+---
+
 ## Package Reference
+
+### rover_bringup - one-command bring-up
+
+| File | Purpose |
+|---|---|
+| `launch/autonomous_mapping.launch.py` | ESP32 bridge + lidar + odometry + SLAM + explorer + ToF + dashboard ([arguments](#2-run)) |
+| `rover_bringup/setup_serial_ports.py` (`ros2 run rover_bringup setup_serial_ports [--install]`) | detects ESP32 vs. lidar and writes udev rules for `/dev/rover_esp32`, `/dev/rover_lidar` |
+| `scripts/install_service.sh [--remove]` | systemd service `autonav` that runs the launch file at boot (domain 7, CycloneDDS) |
+
+`rover_nav` launch files also use `/dev/rover_lidar` automatically when it exists.
 
 ### vl53l5cx_ros - ToF sensor, obstacle & cliff detection
 
@@ -314,11 +389,12 @@ ros2 launch rover_dashboard dashboard.launch.py   # http://<pi-ip>:8080
 * **ToF**: live 8x8 grid with obstacle (O) / cliff (C) marks and nearest obstacle distance.
 * **ESP32 output** and **running nodes**.
 * **Maps**: lists `~/maps` (`.yaml` + `.pgm`), zoom / pan; **Save live map** saves the current SLAM map (image + pose graph).
+* **Autonomous mapping**: explorer state, Start / Stop (with optional map name), Localize now, localization fit; **● Live SLAM map** with explorer boundary and path overlays. Manual driving stops the explorer.
 * **Routes**: *Set start*, *Add waypoint*, *Set end* by clicking on the map (drag to set heading); save named routes per map (`~/maps/<map>.routes.json`); **Go** publishes the start as `/initialpose`, loads the map into `map_server` if running, publishes the route on `/rover/route` (`nav_msgs/Path`) and sends it to Nav2 `navigate_through_poses` if Nav2 is running. **Cancel / stop** cancels navigation and stops the rover.
 
 Config: `config/dashboard.yaml` (`host`, `port`, `maps_dir`, frames). Uses only the Python standard library for HTTP. **There is no login** - anyone on the network can drive the rover; set `host: 127.0.0.1` and use an SSH tunnel on untrusted networks.
 
-JSON API (used by the page): `GET /api/state`, `POST /api/cmd {"c":"w"}`, `GET /api/maps`, `GET /api/maps/<m>/image`, `GET|POST /api/maps/<m>/routes`, `DELETE /api/maps/<m>/routes/<r>`, `POST /api/maps/<m>/go`, `POST /api/nav/cancel`, `POST /api/maps/save {"name":...}`.
+JSON API (used by the page): `GET /api/state`, `POST /api/cmd {"c":"w"}`, `GET /api/maps`, `GET /api/maps/<m>/image`, `GET|POST /api/maps/<m>/routes`, `DELETE /api/maps/<m>/routes/<r>`, `POST /api/maps/<m>/go`, `POST /api/nav/cancel`, `POST /api/maps/save {"name":...}`, `GET /api/live/image`, `POST /api/explorer/start {"name":...}`, `POST /api/explorer/stop`, `POST /api/localize`.
 
 ### rover_nav - mapping, localization, exploration
 
@@ -426,12 +502,13 @@ TF tree: `map → odom` (slam_toolbox) → `base_link` (laser_odometry) → `las
 
 ## Hardware Bring-up Checklist
 
-1. **Separate the serial ports.** The lidar and the ESP32 both use a CP2102 USB-serial chip, and the YDLidar udev rule names every CP2102 `/dev/ydlidar`. With both connected, set each device to its stable path (`ls -l /dev/serial/by-path/`) in `rover_nav/config/ydlidar_x4.yaml` (`port`) and `rover_control/config/esp32_bridge.yaml` (`port`), and always use the same USB sockets.
+1. **Separate the serial ports.** The lidar and the ESP32 both use a CP2102 USB-serial chip, and the YDLidar udev rule names every CP2102 `/dev/ydlidar`. With both connected run `ros2 run rover_bringup setup_serial_ports --install` (creates `/dev/rover_esp32` and `/dev/rover_lidar`), and always use the same USB sockets.
 2. **First drive with the wheels off the ground**: start the bridge and send `w` / `x` from the teleop or dashboard.
 3. **Check the lidar orientation**: put an object directly in front of the rover - it must appear near 0° in `/scan`. Otherwise fix the `base_link → laser_frame` transform in the ydlidar launch file. The wall follower depends on this.
 4. **Measure the rover**: `robot_radius`, real `lin_speed` and `ang_speed` → `rover_nav/config/explorer.yaml`. Slower turning gives sharper scans and better maps.
 5. **ToF**: remove the protective film, set the mount height / tilt in `vl53l5cx_ros/config/vl53l5cx.yaml`, run `/tof/calibrate_floor`, and verify with `tof_matrix_viewer`. Until then set `use_tof: false` in the explorer config.
-6. **Map manually first** (`mapping.launch.py`, drive from the dashboard), save, then test `localization.launch.py` from different start positions before running `explore:=true`.
+6. **Map manually first** (`mapping.launch.py`, drive from the dashboard), save, then test `localization.launch.py` from different start positions.
+7. **First autonomous run**: `ros2 launch rover_bringup autonomous_mapping.launch.py`, press *Start* in the dashboard, keep a hand near *Stop* (or any drive key).
 
 ---
 
@@ -457,6 +534,8 @@ Hardware tests (bench):
 | ToF hazard classification (synthetic floor / box / cliff frames) | all three classified correctly |
 | ESP32 bridge vs. emulated firmware (line protocol + IMU CSV) | commands acknowledged, ~50 Hz `/imu` |
 | Dashboard API (all endpoints) | verified with curl, including invalid input |
+| Dashboard ↔ explorer (sim) | Start with map name, live map PNG, manual override stops the explorer |
+| Serial-port detection | ESP32 (streaming), ESP32 (stream off, answers `h`) and lidar-like binary told apart correctly |
 
 The simulator is cleaner than the real X4 lidar (noise, motion distortion while spinning, reflective surfaces) - expect centimetre-level, not millimetre-level, accuracy on hardware.
 
@@ -471,6 +550,9 @@ The simulator is cleaner than the real X4 lidar (noise, motion distortion while 
 | Laptop does not see the Pi | Same `ROS_DOMAIN_ID` (7) and RMW on both, same subnet, firewall |
 | ToF reads 0-10 mm everywhere | Protective film still on the sensor |
 | ToF left/right swapped | `flip_horizontal: true` in `vl53l5cx.yaml` |
+| Dashboard: "explorer is not running" | Use `autonomous_mapping.launch.py` or `mapping.launch.py` (they start the explorer) |
+| Live map list entry stays empty | slam_toolbox not running or no `/scan` (check the lidar port) |
+| Lidar driver opens the ESP32 (or vice versa) | Run `ros2 run rover_bringup setup_serial_ports --install` with both plugged in |
 | Rover never moves | Bridge `line_ending` must be `"\n"`; check `/rover/esp32_rx` for `# MOTOR ...` replies; check the port isn't the lidar |
 | ESP32 reboots when ROS connects | `reset_on_open: false` (default) in `esp32_bridge.yaml` |
 | Explorer keeps backing up | ToF reports cliff (film on / not calibrated) - set `use_tof: false` |
@@ -501,6 +583,6 @@ The ydlidar driver is a submodule pinned to an upstream commit; local edits insi
 *   Proportional drive: map `cmd_vel` to `m <left> <right>` PWM for smooth turns (`discrete_drive: false`).
 *   Fuse IMU yaw with lidar odometry (robot_localization EKF) for better rotation estimates.
 *   Wheel encoders for odometry independent of the lidar.
-*   Dashboard: explorer start/stop, "localize now" and localization score.
+*   ~~Dashboard: explorer start/stop, "localize now" and localization score~~ - done, plus live map view.
 *   Nav2 configuration (costmaps with lidar + ToF hazard points) for route following.
 *   Physical-rover validation of autonomous mapping and multi-session localization.

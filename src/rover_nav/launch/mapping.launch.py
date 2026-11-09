@@ -19,14 +19,15 @@ import common  # noqa: E402
 
 def setup(context):
     a = {k: context.launch_configurations[k] for k in
-         ('sim', 'world', 'explore', 'continue_map', 'maps_dir', 'map_name', 'start')}
+         ('sim', 'world', 'explore', 'continue_map', 'maps_dir', 'map_name', 'start',
+          'use_tof', 'lidar_port')}
     maps_dir = os.path.expanduser(a['maps_dir'])
     start = [float(v) for v in a['start'].split(',')]
-    actions = common.sensors(common.as_bool(a['sim']), a['world'], start)
+    actions = common.sensors(common.as_bool(a['sim']), a['world'], start, a['lidar_port'])
     actions.append(common.odometry())
     actions.append(common.slam(os.path.join(common.CFG, 'slam_mapping.yaml'), {'mode': 'mapping'}))
     actions.append(common.explorer(autostart=common.as_bool(a['explore']), maps_dir=maps_dir,
-                                   map_name=a['map_name']))
+                                   map_name=a['map_name'], use_tof=common.as_bool(a['use_tof'])))
     if a['continue_map']:
         base = os.path.join(maps_dir, a['continue_map'])
         for ext in ('.yaml', '.posegraph'):
@@ -47,5 +48,9 @@ def generate_launch_description():
         DeclareLaunchArgument('continue_map', default_value=''),
         DeclareLaunchArgument('maps_dir', default_value='~/maps'),
         DeclareLaunchArgument('map_name', default_value=''),
+        DeclareLaunchArgument('use_tof', default_value='true',
+                              description='explorer reacts to ToF cliff/obstacle flags'),
+        DeclareLaunchArgument('lidar_port', default_value='',
+                              description="override the lidar port ('' = /dev/rover_lidar if set up)"),
         OpaqueFunction(function=setup),
     ])

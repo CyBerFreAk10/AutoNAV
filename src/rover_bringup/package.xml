@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rover_bringup</name>
+  <version>0.1.0</version>
+  <description>One-command bring-up of the AutoNav rover for autonomous mapping, serial-port setup and boot service.</description>
+  <maintainer email="edwarddaison@gmail.com">edward</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rover_control</exec_depend>
+  <exec_depend>rover_dashboard</exec_depend>
+  <exec_depend>rover_nav</exec_depend>
+  <exec_depend>vl53l5cx_ros</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

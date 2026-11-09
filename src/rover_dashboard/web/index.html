@@ -110,6 +110,24 @@ ol.pts li button{padding:0 8px;font-size:12px}
   </section>
 
   <section>
+    <h2>Autonomous mapping</h2>
+    <dl class="kv small">
+      <dt>Explorer</dt><dd id="v-ex">not running</dd>
+      <dt>Progress</dt><dd id="v-exinfo">–</dd>
+      <dt>Localization fit</dt><dd id="v-score">–</dd>
+    </dl>
+    <div class="row" style="margin-top:10px">
+      <input id="exName" placeholder="map name (optional)" size="16">
+      <button class="primary" id="exStart">Start</button>
+      <button class="danger" id="exStop">Stop</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="locBtn" title="Find the robot in the loaded map (localization mode)">Localize now</button>
+      <span class="small muted">Driving manually stops the explorer.</span>
+    </div>
+  </section>
+
+  <section>
     <h2>ToF sensor</h2>
     <div class="tof" id="tof"></div>
     <dl class="kv small" style="margin-top:10px">
@@ -305,6 +323,17 @@ function renderState(s) {
   const nav = s.nav;
   $('v-nav').textContent = nav.state + (nav.route ? ` · ${nav.route}` : '') + (nav.detail ? ` · ${nav.detail}` : '');
   $('v-nn').textContent = s.nodes.length; $('nodes').textContent = s.nodes.join('\n');
+  const ex = s.explorer, exLive = ex && (Date.now() / 1000 - ex.stamp) < 3;
+  $('v-ex').textContent = !exLive ? 'not running' :
+    `${ex.state}${ex.phase ? ' · ' + (ex.phase === 'outer' ? 'outer boundary' : 'inner structures') : ''}`;
+  $('v-exinfo').textContent = !exLive ? '–' :
+    `${ex.info || ''}${ex.structures_done ? ` · ${ex.structures_done} structure(s) done` : ''}` +
+    (ex.islands_left !== undefined ? ` · ${ex.islands_left} left` : '');
+  $('v-score').textContent = s.loc_score == null ? '–' : `${Math.round(s.loc_score * 100)}%`;
+  $('exStart').disabled = !exLive; $('exStop').disabled = !exLive;
+  if (s.live_map && map && map.live && s.live_map.stamp !== map.stamp && Date.now() - liveLoaded > 2000) {
+    loadLive(s.live_map);
+  }
   drawMap();
 }
 async function poll() {
@@ -386,6 +415,16 @@ function drawMap() {
     pts.forEach((p, i) => { const [x, y] = worldToScreen(p.x, p.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.stroke(); ctx.setLineDash([]);
   }
+  if (map.live && lastState) {
+    const line = (pts, color, dash, w) => {
+      if (!pts || pts.length < 2) return;
+      ctx.setLineDash(dash); ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath();
+      pts.forEach((p, i) => { const [x, y] = worldToScreen(p[0], p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.stroke(); ctx.setLineDash([]);
+    };
+    line(lastState.explorer_boundary, '#1f9d55', [], 2.5);
+    line(lastState.explorer_path, '#f0a63a', [5, 4], 2);
+  }
   route.waypoints.forEach((p, i) => marker(p, '#2f6fde', String(i + 1)));
   if (route.start) marker(route.start, '#1f9d55', 'S');
   if (route.end) marker(route.end, '#d64545', 'E');
@@ -430,7 +469,8 @@ cv.addEventListener('pointerdown', e => {
   if (!map) return;
   cv.setPointerCapture(e.pointerId);
   const [cx, cy] = local(e);
-  const place = mode !== 'pan' && e.button === 0;
+  const place = mode !== 'pan' && e.button === 0 && !map.live;
+  if (mode !== 'pan' && map.live) toast('Routes are set on saved maps - save the live map first', true);
   const [wx, wy] = screenToWorld(cx, cy);
   drag = {sx: cx, sy: cy, cx, cy, ox: view.ox, oy: view.oy, place, wx, wy, moved: false};
 });
@@ -488,7 +528,7 @@ const plain = p => p && {x: p.x, y: p.y, yaw: p.yaw};
 const routeBody = () => ({start: plain(route.start), end: plain(route.end), waypoints: route.waypoints.map(plain)});
 
 $('saveRouteBtn').onclick = async () => {
-  if (!map) return toast('Pick a map first', true);
+  if (!map || map.live) return toast('Pick a saved map first', true);
   const name = $('routeName').value.trim();
   if (!name) return toast('Give the route a name', true);
   try {
@@ -511,6 +551,7 @@ $('cancelBtn').onclick = async () => {
 
 function renderRoutes(routes) {
   const box = $('routes'); box.innerHTML = '';
+  if (routes === null) { box.innerHTML = '<p class="muted">Live map: routes are set on saved maps. Save the map first.</p>'; return; }
   const names = Object.keys(routes || {});
   if (!names.length) { box.innerHTML = '<p class="muted">No saved routes for this map.</p>'; return; }
   names.sort().forEach(n => {
@@ -540,10 +581,12 @@ async function loadMaps(select) {
   try {
     const r = await api('maps'); maps = r.maps;
     const sel = $('mapSel'); sel.innerHTML = '';
+    const lo = document.createElement('option'); lo.value = LIVE; lo.textContent = '● Live SLAM map'; sel.appendChild(lo);
     maps.forEach(m => { const o = document.createElement('option'); o.value = m.name; o.textContent = m.name; sel.appendChild(o); });
     const empty = $('empty');
+    if (select === LIVE || (!select && localGet('map') === LIVE)) { empty.hidden = true; sel.value = LIVE; return selectMap(LIVE); }
     if (!maps.length) {
-      empty.hidden = false; sel.disabled = true;
+      empty.hidden = false; sel.disabled = false; sel.value = LIVE;
       empty.textContent = `No maps in ${r.dir} yet. Build one with slam_toolbox, then use “Save live map”, ` +
         `or copy a map_server .yaml + .pgm pair into that folder.`;
       map = null; drawMap(); renderRoutes({}); return;
@@ -554,7 +597,34 @@ async function loadMaps(select) {
     await selectMap(sel.value);
   } catch (e) { toast('Could not load maps: ' + e.message, true); }
 }
+const LIVE = '__live__';
+let liveLoaded = 0;
+function loadLive(meta) {
+  liveLoaded = Date.now();
+  const first = !map || !map.live || !img;
+  const next = new Image();
+  next.onload = () => {
+    // keep the view anchored on the world when the live map grows
+    if (!first && map) {
+      const [ax, ay] = worldToScreen(0, 0);
+      map = {...meta, name: LIVE, live: true}; img = next;
+      const [bx, by] = worldToScreen(0, 0); view.ox += ax - bx; view.oy += ay - by;
+      drawMap();
+    } else { map = {...meta, name: LIVE, live: true}; img = next; fit(); }
+  };
+  next.src = `/api/live/image?t=${meta.stamp}`;
+}
 async function selectMap(name) {
+  if (name === LIVE) {
+    localSet('map', LIVE); route = {start: null, waypoints: [], end: null}; renderRoute();
+    $('empty').hidden = true; map = {name: LIVE, live: true, stamp: -1}; img = null;
+    renderRoutes(null);
+    const lm = lastState && lastState.live_map;
+    if (lm) loadLive(lm);
+    else { $('empty').hidden = false; $('empty').textContent = 'No live map yet - start mapping (slam_toolbox).'; }
+    return;
+  }
+  $('empty').hidden = true;
   map = maps.find(m => m.name === name); localSet('map', name);
   route = {start: null, waypoints: [], end: null}; renderRoute();
   img = new Image();
@@ -567,12 +637,28 @@ $('saveMapBtn').onclick = async () => {
   const name = $('saveMapName').value.trim();
   if (!name) return toast('Give the map a name', true);
   $('saveMapBtn').disabled = true; toast('Saving map…');
-  try { await api('maps/save', {method: 'POST', body: {name}}); toast(`Saved map “${name}”`); await loadMaps(name); }
+  try { const r = await api('maps/save', {method: 'POST', body: {name}}); toast(`Saved map “${r.saved}”`); await loadMaps(name); }
   catch (e) { toast(e.message, true); }
   $('saveMapBtn').disabled = false;
 };
 function localGet(k) { try { return localStorage.getItem('rover.' + k); } catch { return null; } }
 function localSet(k, v) { try { localStorage.setItem('rover.' + k, v); } catch {} }
+
+$('exStart').onclick = async () => {
+  try {
+    toast((await api('explorer/start', {method: 'POST', body: {name: $('exName').value.trim()}})).result +
+      ' - the rover will now drive by itself');
+    $('mapSel').value = LIVE; selectMap(LIVE);
+  } catch (e) { toast(e.message, true); }
+};
+$('exStop').onclick = async () => {
+  try { toast((await api('explorer/stop', {method: 'POST'})).result); } catch (e) { toast(e.message, true); }
+};
+$('locBtn').onclick = async () => {
+  $('locBtn').disabled = true; toast('Localizing… keep the rover still');
+  try { toast((await api('localize', {method: 'POST'})).result); } catch (e) { toast(e.message, true); }
+  $('locBtn').disabled = false;
+};
 
 setMode('pan'); renderRoute(); loadMaps(); poll();
 </script>

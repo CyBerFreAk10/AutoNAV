@@ -12,7 +12,7 @@ SHARE = get_package_share_directory('rover_nav')
 CFG = os.path.join(SHARE, 'config')
 
 
-def sensors(sim, world, start):
+def sensors(sim, world, start, lidar_port=''):
     """Lidar driver (+ its base_link->laser_frame TF), or the simulator."""
     if sim:
         x, y, yaw = start
@@ -22,10 +22,21 @@ def sensors(sim, world, start):
             Node(package='tf2_ros', executable='static_transform_publisher', name='static_tf_pub_laser',
                  arguments=['--z', '0.02', '--frame-id', 'base_link', '--child-frame-id', 'laser_frame']),
         ]
+    params = os.path.join(CFG, 'ydlidar_x4.yaml')
+    # Prefer the unique udev name (setup_serial_ports) so the lidar never opens the ESP32's port
+    port = lidar_port or ('/dev/rover_lidar' if os.path.exists('/dev/rover_lidar') else '')
+    if port:
+        with open(params) as f:
+            cfg = yaml.safe_load(f)
+        cfg['ydlidar_ros2_driver_node']['ros__parameters']['port'] = port
+        tmp = tempfile.NamedTemporaryFile('w', suffix='.yaml', prefix='ydlidar_', delete=False)
+        yaml.safe_dump(cfg, tmp)
+        tmp.close()
+        params = tmp.name
     return [IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ydlidar_ros2_driver'), 'launch', 'ydlidar_launch.py')),
-        launch_arguments={'params_file': os.path.join(CFG, 'ydlidar_x4.yaml')}.items())]
+        launch_arguments={'params_file': params}.items())]
 
 
 def odometry():

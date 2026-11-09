@@ -85,6 +85,7 @@ class Explorer(Node):
         self.maps_dir = os.path.expanduser(p('maps_dir', '~/maps'))
         self.map_name = p('map_name', '')
         self.autostart = p('autostart', False)
+        self.add_on_set_parameters_callback(self._on_params)
 
         self.scan = None
         self.laser_tf = None
@@ -122,6 +123,13 @@ class Explorer(Node):
         self.get_logger().info(f'Explorer ready ({"autostart" if self.autostart else "call /explorer/start"}),'
                                f' wall on the {"right" if self.side < 0 else "left"}, '
                                f'{"discrete" if self.discrete else "continuous"} drive')
+
+    def _on_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+        for prm in params:
+            if prm.name == 'map_name':
+                self.map_name = prm.value or ''
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------ bookkeeping
     def reset(self):
