@@ -1,0 +1,10 @@
+esp32_bridge:
+  ros__parameters:
+    # Tip: use the stable /dev/serial/by-path/... name once the lidar is also plugged in
+    port: /dev/ttyUSB0
+    baud: 115200
+    line_ending: "\n"        # ESP32_Code.ino reads whole lines (CR or LF)
+    watchdog_s: 0.5          # send 'x' if no command arrives for this long (0 = off)
+    reset_on_open: false     # false = don't reboot the ESP32 when the port opens
+    use_tof_safety: false    # true = block 'w' while tof/obstacle_detected or tof/cliff_detected
+    cmd_vel_deadband: 0.05

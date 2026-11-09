@@ -1,0 +1,7 @@
+rover_dashboard:
+  ros__parameters:
+    host: 0.0.0.0        # 0.0.0.0 = reachable from other machines on the LAN
+    port: 8080
+    maps_dir: ~/maps     # map_server style <name>.yaml + .pgm; routes saved as <name>.routes.json
+    map_frame: map
+    base_frame: base_link

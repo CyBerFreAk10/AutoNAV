@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rover Dashboard</title>
+<style>
+:root{
+  --bg:#f4f5f7; --panel:#fff; --line:#dfe2e7; --text:#1d2330; --muted:#6a7282;
+  --accent:#2f6fde; --ok:#1f9d55; --warn:#d97706; --bad:#d64545; --idle:#9aa3b2;
+  --btn:#eef1f5; --btn-h:#e2e7ee; --canvas:#cfd4db;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111418; --panel:#1a1e24; --line:#2a3038; --text:#e6e9ee; --muted:#8b94a3;
+    --accent:#5b8ff0; --ok:#3ccf7f; --warn:#f0a63a; --bad:#f06464; --idle:#5d6675;
+    --btn:#242a32; --btn-h:#2e3540; --canvas:#0b0d10;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 16px;
+  background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0 8px 0 0}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;
+  background:var(--btn);font-size:12px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--idle)}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+main{display:grid;grid-template-columns:340px 1fr;gap:16px;padding:16px;max-width:1600px;margin:0 auto}
+@media (max-width:900px){main{grid-template-columns:1fr;padding:12px 16px}}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+section h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
+button,select,input{font:inherit;color:var(--text)}
+button{background:var(--btn);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{background:var(--btn-h)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+button.on{outline:2px solid var(--accent);outline-offset:-2px}
+button:disabled{opacity:.45;cursor:not-allowed}
+select,input{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;min-width:0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.muted{color:var(--muted)} .small{font-size:12px}
+/* drive pad */
+.pad{display:grid;grid-template-columns:repeat(3,72px);grid-template-rows:repeat(3,64px);gap:8px;
+  justify-content:center;user-select:none;touch-action:none}
+.pad button{font-size:20px;font-weight:600;border-radius:12px}
+.pad button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pad .stop{background:var(--bad);color:#fff;border-color:var(--bad);font-size:13px}
+/* tof */
+.tof{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;font-size:10px;font-variant-numeric:tabular-nums}
+.tof div{aspect-ratio:1;display:flex;align-items:center;justify-content:center;border-radius:3px;
+  color:#000;position:relative}
+.tof div.o::after,.tof div.c::after{position:absolute;top:1px;right:3px;font-weight:700;font-size:9px}
+.tof div.o::after{content:"O"}.tof div.c::after{content:"C"}
+.tof div.o{outline:2px solid var(--bad);outline-offset:-2px}
+.tof div.c{outline:2px dashed var(--warn);outline-offset:-2px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-variant-numeric:tabular-nums}
+.kv dt{color:var(--muted)} .kv dd{margin:0}
+.log{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;max-height:140px;overflow:auto;
+  background:var(--bg);border-radius:6px;padding:6px 8px;white-space:pre-wrap;word-break:break-word}
+/* map */
+.mapwrap{position:relative;height:min(70vh,720px);min-height:360px;background:var(--canvas);
+  border-radius:8px;overflow:hidden;touch-action:none}
+canvas{display:block;width:100%;height:100%}
+.maphint{position:absolute;left:10px;bottom:8px;font-size:12px;background:var(--panel);
+  padding:3px 8px;border-radius:6px;opacity:.9;pointer-events:none}
+.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  text-align:center;padding:24px;color:var(--muted)}
+.tools button{min-width:0}
+.legend span{display:inline-flex;align-items:center;gap:5px;margin-right:12px}
+.legend i{width:10px;height:10px;border-radius:50%;display:inline-block}
+ol.pts{margin:0;padding-left:20px;font-variant-numeric:tabular-nums}
+ol.pts li{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+ol.pts li button{padding:0 8px;font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:1200px){.grid2{grid-template-columns:1fr}}
+#toast{position:fixed;right:16px;bottom:16px;max-width:min(420px,calc(100vw - 32px));background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:10px 14px;box-shadow:0 6px 24px #0003;
+  display:none;z-index:10;white-space:pre-line}
+</style>
+</head>
+<body>
+<header>
+  <h1>Rover Dashboard</h1>
+  <span class="pill"><span class="dot" id="d-link"></span><span id="t-link">connecting…</span></span>
+  <span class="pill"><span class="dot" id="d-bridge"></span>ESP32 bridge</span>
+  <span class="pill"><span class="dot" id="d-tof"></span>ToF</span>
+  <span class="pill"><span class="dot" id="d-obst"></span><span id="t-obst">obstacle –</span></span>
+  <span class="pill"><span class="dot" id="d-cliff"></span><span id="t-cliff">cliff –</span></span>
+  <span class="pill"><span class="dot" id="d-nav2"></span>Nav2</span>
+  <span class="pill"><span class="dot" id="d-pose"></span><span id="t-pose">pose –</span></span>
+</header>
+
+<main>
+<div class="col">
+  <section>
+    <h2>Drive</h2>
+    <div class="pad" id="pad">
+      <span></span><button data-c="w">W</button><span></span>
+      <button data-c="a">A</button><button class="stop" data-stop>STOP</button><button data-c="d">D</button>
+      <span></span><button data-c="s">S</button><span></span>
+    </div>
+    <p class="small muted" style="text-align:center;margin:10px 0 0">
+      Hold a button or W A S D to drive · release to stop · Space = stop</p>
+    <dl class="kv small" style="margin-top:10px">
+      <dt>ESP32 got</dt><dd id="v-sent">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>ToF sensor</h2>
+    <div class="tof" id="tof"></div>
+    <dl class="kv small" style="margin-top:10px">
+      <dt>Nearest obstacle</dt><dd id="v-near">–</dd>
+      <dt>Data age</dt><dd id="v-tofage">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>ESP32 output</h2>
+    <div class="log" id="rx"><span class="muted">nothing yet</span></div>
+  </section>
+
+  <section>
+    <h2>System</h2>
+    <dl class="kv small">
+      <dt>Dashboard up</dt><dd id="v-up">–</dd>
+      <dt>Navigation</dt><dd id="v-nav">–</dd>
+    </dl>
+    <details style="margin-top:8px"><summary class="small">Running nodes (<span id="v-nn">0</span>)</summary>
+      <div class="log" id="nodes"></div></details>
+  </section>
+</div>
+
+<div class="col">
+  <section>
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <div class="row">
+        <h2 style="margin:0">Map</h2>
+        <select id="mapSel"></select>
+        <button id="fitBtn" title="Fit map to view">Fit</button>
+      </div>
+      <div class="row">
+        <input id="saveMapName" placeholder="new map name" size="14">
+        <button id="saveMapBtn" title="Save the live /map (slam_toolbox) to the maps folder">Save live map</button>
+      </div>
+    </div>
+    <div class="row tools" style="margin-bottom:10px">
+      <span class="small muted">Click tool:</span>
+      <button data-mode="pan" class="on">Pan</button>
+      <button data-mode="start">Set start</button>
+      <button data-mode="wp">Add waypoint</button>
+      <button data-mode="end">Set end</button>
+      <span class="legend small muted" style="margin-left:auto">
+        <span><i style="background:#1f9d55"></i>start</span>
+        <span><i style="background:#2f6fde"></i>waypoint</span>
+        <span><i style="background:#d64545"></i>end</span>
+        <span><i style="background:#f0a63a"></i>robot</span>
+      </span>
+    </div>
+    <div class="mapwrap" id="mapwrap">
+      <canvas id="cv"></canvas>
+      <div class="maphint" id="hint">Scroll to zoom · drag to pan</div>
+      <div class="empty" id="empty" hidden></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>Current route</h2>
+      <ol class="pts" id="pts"></ol>
+      <p class="small muted" id="noPts">Pick “Set start”, then click on the map. Drag while clicking to set the heading.</p>
+      <div class="row" style="margin-top:10px">
+        <input id="routeName" placeholder="route name" size="14">
+        <button id="saveRouteBtn">Save route</button>
+        <button id="clearBtn">Clear</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="small"><input type="checkbox" id="optInit" checked> set start as initial pose</label>
+        <label class="small"><input type="checkbox" id="optLoad" checked> load this map in map_server</label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="goBtn">Go</button>
+        <button class="danger" id="cancelBtn">Cancel / stop</button>
+      </div>
+    </section>
+    <section>
+      <h2>Saved routes</h2>
+      <div id="routes" class="small"></div>
+    </section>
+  </div>
+</div>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, opts = {}) => {
+  const r = await fetch('/api/' + path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? {'Content-Type': 'application/json'} : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined});
+  if ((r.headers.get('content-type') || '').includes('json')) {
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    return j;
+  }
+  if (!r.ok) throw new Error(r.statusText);
+  return r;
+};
+let toastT;
+function toast(msg, bad) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  t.style.borderColor = bad ? 'var(--bad)' : 'var(--line)';
+  clearTimeout(toastT); toastT = setTimeout(() => t.style.display = 'none', bad ? 6000 : 3500);
+}
+const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
+
+/* ---------------------------------------------------------------- drive */
+const CMD_NAMES = {w: 'forward', s: 'back', a: 'left', d: 'right', x: 'stop'};
+let driveTimer = null, driveCmd = null;
+function startDrive(c) {
+  if (driveCmd === c) return;
+  stopTimer(); driveCmd = c;
+  document.querySelectorAll('#pad [data-c]').forEach(b => b.classList.toggle('active', b.dataset.c === c));
+  const send = () => api('cmd', {method: 'POST', body: {c}}).catch(() => {});
+  send(); driveTimer = setInterval(send, 100);   // keep the bridge watchdog fed
+}
+function stopTimer() { clearInterval(driveTimer); driveTimer = null; }
+function stopDrive() {
+  stopTimer(); driveCmd = null;
+  document.querySelectorAll('#pad [data-c]').forEach(b => b.classList.remove('active'));
+  api('cmd', {method: 'POST', body: {c: 'x'}}).catch(() => {});
+}
+document.querySelectorAll('#pad [data-c]').forEach(b => {
+  b.addEventListener('pointerdown', e => { b.setPointerCapture(e.pointerId); startDrive(b.dataset.c); });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, () => {
+    if (driveCmd === b.dataset.c) stopDrive(); }));
+});
+document.querySelector('#pad [data-stop]').addEventListener('click', stopDrive);
+const KEYMAP = {w: 'w', a: 'a', s: 's', d: 'd', arrowup: 'w', arrowdown: 's', arrowleft: 'a', arrowright: 'd'};
+addEventListener('keydown', e => {
+  if (e.target.matches('input,select,textarea')) return;
+  const k = e.key.toLowerCase();
+  if (k === ' ' || k === 'x') {
+    e.preventDefault();
+    if (document.activeElement && document.activeElement.tagName === 'BUTTON') document.activeElement.blur();
+    stopDrive(); return;
+  }
+  if (KEYMAP[k]) { e.preventDefault(); if (!e.repeat) startDrive(KEYMAP[k]); }
+});
+addEventListener('keyup', e => {
+  const c = KEYMAP[e.key.toLowerCase()];
+  if (c && c === driveCmd) stopDrive();
+});
+addEventListener('blur', () => { if (driveCmd) stopDrive(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && driveCmd) stopDrive(); });
+
+/* ---------------------------------------------------------------- status */
+const tofCells = [];
+for (let i = 0; i < 64; i++) { const d = document.createElement('div'); $('tof').appendChild(d); tofCells.push(d); }
+function tofColor(mm) {           // near = red .. far = blue
+  if (mm < 0) return 'var(--btn)';
+  const t = Math.min(mm / 2000, 1);
+  return `hsl(${Math.round(t * 230)} 80% ${55 + 10 * (1 - Math.abs(t - .5) * 2)}%)`;
+}
+let lastState = null;
+function renderState(s) {
+  lastState = s;
+  setDot('d-link', 'ok'); $('t-link').textContent = 'connected';
+  setDot('d-bridge', s.bridge_running ? 'ok' : 'bad');
+  const tofLive = s.tof.age !== null && s.tof.age < 1;
+  setDot('d-tof', tofLive ? 'ok' : (s.tof.age === null ? '' : 'bad'));
+  const flag = (id, tid, v, label) => {
+    setDot(id, v === null ? '' : v ? 'bad' : 'ok');
+    $(tid).textContent = `${label} ${v === null ? '–' : v ? 'YES' : 'no'}`;
+  };
+  flag('d-obst', 't-obst', s.tof.obstacle, 'obstacle');
+  flag('d-cliff', 't-cliff', s.tof.cliff, 'cliff');
+  setDot('d-nav2', s.nav2_available ? 'ok' : '');
+  setDot('d-pose', s.pose ? 'ok' : '');
+  $('t-pose').textContent = s.pose ? `x ${s.pose.x.toFixed(2)} y ${s.pose.y.toFixed(2)}` : 'pose –';
+
+  const sent = s.rover.sent;
+  $('v-sent').textContent = sent ? `${sent} (${CMD_NAMES[sent] || '?'})` : '–';
+  $('v-near').textContent = s.tof.nearest == null ? 'none' : `${(s.tof.nearest * 100).toFixed(0)} cm`;
+  $('v-tofage').textContent = s.tof.age == null ? 'no data' : `${s.tof.age.toFixed(1)} s`;
+  const dist = s.tof.distance, cls = s.tof.cls;
+  if (dist) {
+    const n = Math.round(Math.sqrt(dist.length));
+    $('tof').style.gridTemplateColumns = `repeat(${n},1fr)`;
+    tofCells.forEach((d, i) => {
+      d.hidden = i >= dist.length; if (d.hidden) return;
+      const v = dist[i]; d.textContent = v < 0 ? '–' : v;
+      d.style.background = tofColor(v); d.style.color = v < 0 ? 'var(--muted)' : '#000';
+      d.className = cls && cls[i] === 1 ? 'o' : cls && cls[i] === 2 ? 'c' : '';
+    });
+  }
+  const rx = s.rover.rx;
+  $('rx').innerHTML = rx.length ? '' : '<span class="muted">nothing yet</span>';
+  if (rx.length) $('rx').textContent = rx.map(r => `${r[0]}  ${r[1]}`).join('\n');
+  const up = s.uptime; $('v-up').textContent = `${Math.floor(up / 3600)}h ${Math.floor(up / 60) % 60}m ${up % 60}s`;
+  const nav = s.nav;
+  $('v-nav').textContent = nav.state + (nav.route ? ` · ${nav.route}` : '') + (nav.detail ? ` · ${nav.detail}` : '');
+  $('v-nn').textContent = s.nodes.length; $('nodes').textContent = s.nodes.join('\n');
+  drawMap();
+}
+async function poll() {
+  try { renderState(await api('state')); }
+  catch (e) { setDot('d-link', 'bad'); $('t-link').textContent = 'disconnected'; }
+  setTimeout(poll, 250);
+}
+
+/* ---------------------------------------------------------------- map */
+const cv = $('cv'), ctx = cv.getContext('2d');
+let maps = [], map = null, img = null;
+let view = {scale: 1, ox: 0, oy: 0};          // screen = img_px * scale + o
+let mode = 'pan';
+let route = {start: null, waypoints: [], end: null};
+let drag = null;
+
+const worldToImg = (x, y) => [(x - map.origin[0]) / map.resolution, map.height - (y - map.origin[1]) / map.resolution];
+const imgToWorld = (u, v) => [map.origin[0] + u * map.resolution, map.origin[1] + (map.height - v) * map.resolution];
+const imgToScreen = (u, v) => [u * view.scale + view.ox, v * view.scale + view.oy];
+const screenToImg = (sx, sy) => [(sx - view.ox) / view.scale, (sy - view.oy) / view.scale];
+const worldToScreen = (x, y) => imgToScreen(...worldToImg(x, y));
+const screenToWorld = (sx, sy) => imgToWorld(...screenToImg(sx, sy));
+
+function resizeCanvas() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); drawMap();
+}
+new ResizeObserver(resizeCanvas).observe($('mapwrap'));
+
+function fit() {
+  if (!map) return;
+  const r = cv.getBoundingClientRect();
+  view.scale = Math.min(r.width / map.width, r.height / map.height) * 0.95;
+  view.ox = (r.width - map.width * view.scale) / 2; view.oy = (r.height - map.height * view.scale) / 2;
+  drawMap();
+}
+$('fitBtn').onclick = fit;
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function arrow(sx, sy, yaw, len, color, width = 2) {
+  const ex = sx + Math.cos(yaw) * len, ey = sy - Math.sin(yaw) * len;
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+  const a = Math.atan2(ey - sy, ex - sx);
+  ctx.beginPath(); ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - 7 * Math.cos(a - .5), ey - 7 * Math.sin(a - .5));
+  ctx.lineTo(ex - 7 * Math.cos(a + .5), ey - 7 * Math.sin(a + .5)); ctx.closePath();
+  ctx.fillStyle = color; ctx.fill();
+}
+function marker(p, color, label) {
+  const [sx, sy] = worldToScreen(p.x, p.y);
+  arrow(sx, sy, p.yaw, 22, color, 2.5);
+  ctx.beginPath(); ctx.arc(sx, sy, 8, 0, 7); ctx.fillStyle = color; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, sx, sy + .5);
+}
+function routePoints() {
+  return [route.start, ...route.waypoints, route.end].filter(Boolean);
+}
+function drawMap() {
+  const r = cv.getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!map || !img) return;
+  ctx.imageSmoothingEnabled = view.scale < 2;
+  ctx.drawImage(img, view.ox, view.oy, map.width * view.scale, map.height * view.scale);
+  // 1 m scale bar
+  const px = 1 / map.resolution * view.scale;
+  ctx.fillStyle = css('--text'); ctx.fillRect(r.width - 20 - px, r.height - 18, px, 3);
+  ctx.font = '11px system-ui'; ctx.textAlign = 'right'; ctx.fillText('1 m', r.width - 20, r.height - 24);
+  // origin
+  const [o0, o1] = worldToScreen(0, 0);
+  arrow(o0, o1, 0, 18, '#d64545', 1.5); arrow(o0, o1, Math.PI / 2, 18, '#1f9d55', 1.5);
+  // route line
+  const pts = routePoints();
+  if (pts.length > 1) {
+    ctx.setLineDash([6, 5]); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath();
+    pts.forEach((p, i) => { const [x, y] = worldToScreen(p.x, p.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  route.waypoints.forEach((p, i) => marker(p, '#2f6fde', String(i + 1)));
+  if (route.start) marker(route.start, '#1f9d55', 'S');
+  if (route.end) marker(route.end, '#d64545', 'E');
+  // robot
+  const pose = lastState && lastState.pose;
+  if (pose) {
+    const [sx, sy] = worldToScreen(pose.x, pose.y);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(-pose.yaw);
+    ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-9, 9); ctx.lineTo(-4, 0); ctx.lineTo(-9, -9); ctx.closePath();
+    ctx.fillStyle = '#f0a63a'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.restore();
+  }
+  // heading drag preview
+  if (drag && drag.place && drag.moved) {
+    const [sx, sy] = worldToScreen(drag.wx, drag.wy);
+    arrow(sx, sy, Math.atan2(-(drag.cy - sy), drag.cx - sx), Math.hypot(drag.cx - sx, drag.cy - sy), css('--accent'));
+  }
+}
+
+/* auto-heading: points placed without dragging face the next point */
+function autoYaws() {
+  const pts = routePoints();
+  pts.forEach((p, i) => {
+    if (!p.auto) return;
+    const q = pts[i + 1] || pts[i - 1];
+    if (!q) { p.yaw = 0; return; }
+    p.yaw = pts[i + 1] ? Math.atan2(q.y - p.y, q.x - p.x) : Math.atan2(p.y - q.y, p.x - q.x);
+  });
+}
+
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+  $('hint').textContent = m === 'pan' ? 'Scroll to zoom · drag to pan'
+    : `Click to place ${m === 'wp' ? 'a waypoint' : 'the ' + m} · drag to set heading · scroll to zoom`;
+  cv.style.cursor = m === 'pan' ? 'grab' : 'crosshair';
+}
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+
+const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+cv.addEventListener('pointerdown', e => {
+  if (!map) return;
+  cv.setPointerCapture(e.pointerId);
+  const [cx, cy] = local(e);
+  const place = mode !== 'pan' && e.button === 0;
+  const [wx, wy] = screenToWorld(cx, cy);
+  drag = {sx: cx, sy: cy, cx, cy, ox: view.ox, oy: view.oy, place, wx, wy, moved: false};
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const [cx, cy] = local(e);
+  drag.cx = cx; drag.cy = cy;
+  if (Math.hypot(cx - drag.sx, cy - drag.sy) > 8) drag.moved = true;
+  if (!drag.place) { view.ox = drag.ox + cx - drag.sx; view.oy = drag.oy + cy - drag.sy; }
+  drawMap();
+});
+cv.addEventListener('pointerup', () => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.place) {
+    const [sx, sy] = worldToScreen(d.wx, d.wy);
+    const p = {x: d.wx, y: d.wy, yaw: 0, auto: !d.moved};
+    if (d.moved) p.yaw = Math.atan2(-(d.cy - sy), d.cx - sx);
+    if (mode === 'start') route.start = p;
+    else if (mode === 'end') route.end = p;
+    else route.waypoints.push(p);
+    autoYaws(); renderRoute();
+  }
+  drawMap();
+});
+cv.addEventListener('wheel', e => {
+  if (!map) return;
+  e.preventDefault();
+  const [cx, cy] = local(e), [u, v] = screenToImg(cx, cy);
+  view.scale = Math.min(Math.max(view.scale * Math.exp(-e.deltaY * 0.0015), 0.05), 60);
+  view.ox = cx - u * view.scale; view.oy = cy - v * view.scale;
+  drawMap();
+}, {passive: false});
+
+/* ---------------------------------------------------------------- route editing */
+const deg = r => (r * 180 / Math.PI).toFixed(0) + '°';
+const fmt = p => `x ${p.x.toFixed(2)}, y ${p.y.toFixed(2)}, ${deg(p.yaw)}`;
+function renderRoute() {
+  const ol = $('pts'); ol.innerHTML = '';
+  const add = (label, p, onDel) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span><b>${label}</b> <span class="muted">${fmt(p)}</span></span>`;
+    const b = document.createElement('button'); b.textContent = '✕'; b.title = 'remove';
+    b.onclick = () => { onDel(); autoYaws(); renderRoute(); drawMap(); };
+    li.appendChild(b); ol.appendChild(li);
+  };
+  if (route.start) add('Start', route.start, () => route.start = null);
+  route.waypoints.forEach((p, i) => add(`Waypoint ${i + 1}`, p, () => route.waypoints.splice(i, 1)));
+  if (route.end) add('End', route.end, () => route.end = null);
+  $('noPts').hidden = !!routePoints().length;
+  $('goBtn').disabled = !(route.start && route.end);
+}
+$('clearBtn').onclick = () => { route = {start: null, waypoints: [], end: null}; renderRoute(); drawMap(); };
+const plain = p => p && {x: p.x, y: p.y, yaw: p.yaw};
+const routeBody = () => ({start: plain(route.start), end: plain(route.end), waypoints: route.waypoints.map(plain)});
+
+$('saveRouteBtn').onclick = async () => {
+  if (!map) return toast('Pick a map first', true);
+  const name = $('routeName').value.trim();
+  if (!name) return toast('Give the route a name', true);
+  try {
+    const r = await api(`maps/${map.name}/routes`, {method: 'POST', body: {name, route: routeBody()}});
+    renderRoutes(r.routes); toast(`Saved route “${name}”`);
+  } catch (e) { toast(e.message, true); }
+};
+$('goBtn').onclick = async () => {
+  try {
+    const r = await api(`maps/${map.name}/go`, {method: 'POST', body: {
+      route: routeBody(), name: $('routeName').value.trim() || null,
+      set_initial_pose: $('optInit').checked, load_map: $('optLoad').checked}});
+    toast(r.steps.join('\n'));
+  } catch (e) { toast(e.message, true); }
+};
+$('cancelBtn').onclick = async () => {
+  stopDrive();
+  try { toast((await api('nav/cancel', {method: 'POST'})).result); } catch (e) { toast(e.message, true); }
+};
+
+function renderRoutes(routes) {
+  const box = $('routes'); box.innerHTML = '';
+  const names = Object.keys(routes || {});
+  if (!names.length) { box.innerHTML = '<p class="muted">No saved routes for this map.</p>'; return; }
+  names.sort().forEach(n => {
+    const r = routes[n];
+    const row = document.createElement('div'); row.className = 'row';
+    row.style.cssText = 'justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)';
+    row.innerHTML = `<span><b></b><br><span class="muted">${r.waypoints.length} waypoint(s) · ${r.saved || ''}</span></span>`;
+    row.querySelector('b').textContent = n;
+    const btns = document.createElement('span'); btns.className = 'row';
+    const load = document.createElement('button'); load.textContent = 'Load';
+    load.onclick = () => {
+      route = {start: {...r.start}, end: {...r.end}, waypoints: r.waypoints.map(p => ({...p}))};
+      $('routeName').value = n; renderRoute(); drawMap();
+    };
+    const del = document.createElement('button'); del.textContent = 'Delete';
+    del.onclick = async () => {
+      if (!confirm(`Delete route “${n}”?`)) return;
+      try { renderRoutes((await api(`maps/${map.name}/routes/${encodeURIComponent(n)}`, {method: 'DELETE'})).routes); }
+      catch (e) { toast(e.message, true); }
+    };
+    btns.append(load, del); row.appendChild(btns); box.appendChild(row);
+  });
+}
+
+/* ---------------------------------------------------------------- map list */
+async function loadMaps(select) {
+  try {
+    const r = await api('maps'); maps = r.maps;
+    const sel = $('mapSel'); sel.innerHTML = '';
+    maps.forEach(m => { const o = document.createElement('option'); o.value = m.name; o.textContent = m.name; sel.appendChild(o); });
+    const empty = $('empty');
+    if (!maps.length) {
+      empty.hidden = false; sel.disabled = true;
+      empty.textContent = `No maps in ${r.dir} yet. Build one with slam_toolbox, then use “Save live map”, ` +
+        `or copy a map_server .yaml + .pgm pair into that folder.`;
+      map = null; drawMap(); renderRoutes({}); return;
+    }
+    empty.hidden = true; sel.disabled = false;
+    const want = select || localGet('map') || maps[0].name;
+    sel.value = maps.some(m => m.name === want) ? want : maps[0].name;
+    await selectMap(sel.value);
+  } catch (e) { toast('Could not load maps: ' + e.message, true); }
+}
+async function selectMap(name) {
+  map = maps.find(m => m.name === name); localSet('map', name);
+  route = {start: null, waypoints: [], end: null}; renderRoute();
+  img = new Image();
+  img.onload = () => { fit(); };
+  img.src = `/api/maps/${encodeURIComponent(name)}/image?t=${map.modified}`;
+  renderRoutes((await api(`maps/${name}/routes`)).routes);
+}
+$('mapSel').onchange = e => selectMap(e.target.value);
+$('saveMapBtn').onclick = async () => {
+  const name = $('saveMapName').value.trim();
+  if (!name) return toast('Give the map a name', true);
+  $('saveMapBtn').disabled = true; toast('Saving map…');
+  try { await api('maps/save', {method: 'POST', body: {name}}); toast(`Saved map “${name}”`); await loadMaps(name); }
+  catch (e) { toast(e.message, true); }
+  $('saveMapBtn').disabled = false;
+};
+function localGet(k) { try { return localStorage.getItem('rover.' + k); } catch { return null; } }
+function localSet(k, v) { try { localStorage.setItem('rover.' + k, v); } catch {} }
+
+setMode('pan'); renderRoute(); loadMaps(); poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+global_localizer:
+  ros__parameters:
+    robot_radius: 0.12
+    max_range: 8.0
+    coarse_step: 0.2          # m between candidate positions in the first pass
+    coarse_angle_deg: 4.0
+    min_score: 0.45           # below this the scan doesn't match the map
+    min_misfit_ratio: 1.5     # 2nd-best pose must explain the scan this much worse, else ambiguous
+    monitor: true
+    lost_score: 0.35
+    lost_time: 5.0
+    auto_recover: true
+laser_odometry:
+  ros__parameters:
+    max_range: 8.0
+    voxel_size: 0.04
+    keyframe_dist: 0.15
+    keyframe_angle: 0.15

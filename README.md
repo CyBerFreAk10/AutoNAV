@@ -48,6 +48,59 @@ AutoNav is a fully autonomous ground vehicle designed for comprehensive warehous
   
 ## Next Steps
 
-*   Develop the ROS 2 node (micro-ROS or standard serial bridge) to translate Nav2 `cmd_vel` messages into raw PWM commands for the ESP32.
-*   Publish the ESP32's IMU data stream as a ROS 2 `sensor_msgs/Imu` topic.
-*   Transition from Gazebo simulation to physical hardware testing for autonomous mapping.
+*   ~~Serial bridge from ROS 2 to the ESP32~~ done (`rover_control`, w/s/a/d/x). Next: proportional `cmd_vel` -> `m <left> <right>` PWM.
+*   ~~Publish the ESP32's IMU data stream as `sensor_msgs/Imu`~~ done (`/imu`). Next: fuse IMU yaw with lidar odometry (robot_localization EKF).
+*   Transition from simulation to physical hardware testing for autonomous mapping.
+
+## ROS 2 Software
+
+This repository is a colcon workspace (ROS 2 Jazzy, Raspberry Pi 5, Ubuntu 24.04).
+
+| Package | What it does |
+|---|---|
+| `vl53l5cx_ros` | VL53L5CX 8x8 ToF driver (I2C), obstacle + cliff detection, terminal / heatmap matrix viewers |
+| `rover_control` | ESP32 serial bridge (`/rover/cmd`, `/cmd_vel` -> w/s/a/d/x, IMU CSV -> `/imu`) and laptop keyboard teleop |
+| `rover_dashboard` | Web dashboard on port 8080: status, hold-to-drive, stored maps, start/waypoint/end routes |
+| `rover_nav` | Lidar odometry, SLAM (slam_toolbox), global localization, boundary-first explorer, 2D simulator |
+| `ydlidar_ros2_driver` | Upstream YDLidar driver (git submodule); X4 settings live in `rover_nav/config/ydlidar_x4.yaml` |
+
+### Setup
+
+```bash
+git clone --recurse-submodules https://github.com/CyBerFreAk10/AutoNAV.git ~/autonav_ws
+# YDLidar SDK (needed by the driver): https://github.com/YDLIDAR/YDLidar-SDK
+sudo apt install ros-jazzy-slam-toolbox ros-jazzy-nav2-map-server ros-jazzy-rmw-cyclonedds-cpp \
+    python3-scipy python3-serial python3-pil
+pip install --user --break-system-packages vl53l5cx-ctypes smbus2
+cd ~/autonav_ws && colcon build && source install/setup.bash
+```
+
+Network: Pi and laptop use `ROS_DOMAIN_ID=7`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`.
+
+### Running
+
+```bash
+ros2 launch rover_control esp32_bridge.launch.py              # ESP32 motors + IMU
+ros2 launch vl53l5cx_ros vl53l5cx.launch.py                   # ToF + obstacle/cliff detection
+ros2 launch rover_dashboard dashboard.launch.py               # http://<pi-ip>:8080
+python3 rover_teleop.py                                       # on the laptop: w/a/s/d/x
+
+ros2 launch rover_nav mapping.launch.py                       # record a map (drive manually)
+ros2 launch rover_nav mapping.launch.py explore:=true         # autonomous boundary-first mapping
+ros2 launch rover_nav mapping.launch.py continue_map:=<name>  # extend a saved map from any start pose
+ros2 launch rover_nav localization.launch.py map:=<name>      # localize in a saved map (unknown start pose)
+ros2 launch rover_nav mapping.launch.py sim:=true explore:=true  # simulator (use another ROS_DOMAIN_ID!)
+```
+
+Maps are saved in `~/maps` (`.yaml`/`.pgm` image + slam_toolbox `.posegraph`/`.data`).
+
+### Mapping strategy (`rover_nav/explorer`)
+
+1. Drive to the nearest wall and follow it (wall on the right) until the robot is back at the loop start.
+2. The loop's winding direction tells the outer boundary (counter-clockwise) from a free-standing object (clockwise); objects are recorded and the search continues.
+3. Every obstacle cluster inside the boundary loop is an inner structure: plan a path beside it and follow it until that loop closes.
+4. Visit remaining unseen gaps inside the boundary, then save the map.
+
+Localization: `laser_odometry` (point-to-line ICP, no wheel encoders needed) feeds slam_toolbox; `global_localizer` finds the pose in a saved map with no initial guess (exhaustive scan matching, rejects ambiguous matches) and re-localizes automatically when the scan stops fitting the map.
+
+Simulator results (8 x 6 m room, 3 inner structures): full exploration completed; mean pose error 0.8 cm; global localization correct from 20/20 random poses (median 2.8 cm / 0.1°).

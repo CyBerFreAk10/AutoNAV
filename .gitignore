@@ -1,0 +1,13 @@
+# colcon output
+build/
+install/
+log/
+# python
+__pycache__/
+*.pyc
+# not used (needs building from source; laser_odometry in rover_nav replaces it)
+src/rf2o_laser_odometry/
+# local maps / editor files
+*.posegraph
+*.data
+.vscode/

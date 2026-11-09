@@ -1,0 +1,36 @@
+vl53l5cx_node:
+  ros__parameters:
+    i2c_bus: 1
+    i2c_address: 0x29
+    resolution: 8          # 8 -> 8x8 (max 15 Hz), 4 -> 4x4 (max 60 Hz)
+    frequency_hz: 15
+    frame_id: tof_link
+    sharpener_percent: 5
+    target_order: strongest   # strongest | closest
+    valid_statuses: [5, 6, 9] # ST: 5 = 100% valid, 6/9 = 50% valid
+    flip_horizontal: false    # mirror the matrix if left/right looks swapped
+    flip_vertical: false
+
+tof_hazard_node:
+  ros__parameters:
+    base_frame: base_link
+    # --- mounting (overridden by ~/.ros/vl53l5cx_floor.yaml after /tof/calibrate_floor) ---
+    mount_height_m: 0.10      # sensor height above the floor
+    tilt_down_deg: 20.0       # optical axis angle BELOW horizontal (70 deg from vertical = 20)
+    mount_x_m: 0.0            # sensor position relative to base_link
+    mount_y_m: 0.0
+    range_model: radial       # radial | perpendicular (calibration picks the one that fits)
+    fov_deg: 45.0
+    use_calibration: true
+    calibration_file: ~/.ros/vl53l5cx_floor.yaml
+    # --- obstacle ---
+    obstacle_min_height: 0.03   # m above floor; lower bumps are ignored
+    obstacle_max_height: 0.50   # m; ignore things above the robot (tables etc.)
+    obstacle_max_distance: 0.60 # m ahead of base_link
+    # --- cliff ---
+    cliff_min_drop: 0.04        # m below floor level to count as a drop
+    cliff_max_floor_range: 0.80 # only zones that should see floor within this range
+    invalid_is_cliff: true      # "no return" where floor is expected = cliff
+    # --- filtering ---
+    min_zones: 2                # zones that must agree
+    debounce_frames: 2          # consecutive frames to switch on/off

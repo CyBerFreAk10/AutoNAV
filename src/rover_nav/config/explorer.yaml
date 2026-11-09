@@ -1,0 +1,20 @@
+explorer:
+  ros__parameters:
+    robot_radius: 0.15        # half the rover's width (+ a bit)  <-- MEASURE YOUR ROVER
+    wall_side: right          # keep the wall on this side
+    wall_dist: 0.35           # distance from robot centre to the wall while following
+    front_stop: 0.40          # turn away when something is this close in front
+    lin_speed: 0.15           # m/s  - set to your rover's real 'w' speed
+    ang_speed: 0.6            # rad/s - set to your rover's real 'a'/'d' turn rate
+    discrete_drive: true      # ESP32 only does w/s/a/d/x
+    control_hz: 10.0
+    loop_min_length: 2.5      # must travel this far before a loop can close
+    loop_close_radius: 0.35   # back within this distance of the start = loop closed
+    max_follow_length: 80.0
+    island_min_area: 0.02     # m^2, ignore smaller blobs (noise, chair legs)
+    frontier_min_cells: 8
+    goal_tolerance: 0.2
+    use_tof: true             # cliff -> back off; ToF obstacle -> treat as blocked
+    maps_dir: ~/maps
+    map_name: ""              # "" = explored_<date>
+    autostart: false          # true = start immediately (sim); else call /explorer/start
