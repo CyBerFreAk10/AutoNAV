@@ -20,5 +20,6 @@ setup(
     license='MIT',
     entry_points={'console_scripts': [
         'setup_serial_ports = rover_bringup.setup_serial_ports:main',
+        'preflight = rover_bringup.preflight:main',
     ]},
 )

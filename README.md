@@ -140,6 +140,7 @@ This repository **is** a colcon workspace (`~/autonav_ws` on the Pi).
 ```
 AutoNAV/
 ├── ESP32_Code.ino                 ESP32 firmware
+├── field_test.sh                  preflight checks + launch everything (field testing)
 ├── README.md
 └── src/
     ├── vl53l5cx_ros/              ToF driver, obstacle/cliff detection, matrix viewers
@@ -218,9 +219,11 @@ If the laptop cannot see the Pi's topics, check the firewall (`sudo ufw disable`
 **Autonomous mapping (everything in one command):**
 
 ```bash
-ros2 launch rover_bringup autonomous_mapping.launch.py
+~/autonav_ws/field_test.sh            # checks everything, then starts the stack
 # open http://<pi-ip>:8080 -> "Autonomous mapping" -> Start
 ```
+
+(`ros2 launch rover_bringup autonomous_mapping.launch.py` starts the stack without the checks.)
 
 See [Autonomous Mapping](#autonomous-mapping) for details. To run parts individually, each line in its own terminal on the Pi (after `source ~/autonav_ws/install/setup.bash`):
 
@@ -248,6 +251,29 @@ ROS_DOMAIN_ID=99 ros2 launch rover_nav mapping.launch.py sim:=true explore:=true
 ---
 
 ## Autonomous Mapping
+
+### 0. Field test script (recommended)
+
+`field_test.sh` in the repository root builds the workspace if needed, runs the preflight checks and then starts the whole stack:
+
+```bash
+cd ~/autonav_ws
+./field_test.sh --check-only          # only check (rover does not move)
+./field_test.sh --motion --apply      # + measure speed / turn rate and save them (rover moves briefly)
+./field_test.sh                       # check, then launch; Start from the dashboard
+./field_test.sh --record map_name:=warehouse_a   # + rosbag of the run in ~/autonav_logs
+```
+
+| Flag | Meaning |
+|---|---|
+| `--check-only` | run the checks and exit |
+| `--motion` | timed moves (forward/back/left/right, 0.5 s each, stopped by the firmware): measures speed and turn rate, checks that `w` goes forward in the lidar frame, that `a` turns left, and that lidar and IMU agree on the rotation direction |
+| `--apply` | write the measured `lin_speed` / `ang_speed` into `rover_nav/config/explorer.yaml` and rebuild |
+| `--record` | record `/scan /odom /tf /imu /cmd_vel /map /explorer/state ...` to `~/autonav_logs/bag_<date>` |
+| `--force` / `--skip-checks` | launch despite FAILs / without checks |
+| anything else | passed to `autonomous_mapping.launch.py` (`explore:=true`, `tof:=false`, `continue_map:=...`) |
+
+The preflight (`ros2 run rover_bringup preflight`) checks: ROS environment and domain, packages built and up to date, Python modules, user groups, **power supply undervoltage / throttling**, CPU temperature, disk space, network / dashboard URL, that the stack is not already running, explorer / bridge / ToF configuration, serial devices (ESP32 vs. lidar identification, fixed names), ESP32 IMU stream (rate, gravity, gyro drift), ToF (I2C, ranging, protective film), lidar (scan rate, valid points, distances front/left/back/right to compare with reality). Each FAIL / WARN prints the fix. Results are also saved to `~/autonav_logs/preflight_<date>.json`; launch output to `~/autonav_logs/run_<date>.log`.
 
 ### 1. One-time setup
 
@@ -304,6 +330,7 @@ The same from the command line: `ros2 service call /explorer/start std_srvs/srv/
 | File | Purpose |
 |---|---|
 | `launch/autonomous_mapping.launch.py` | ESP32 bridge + lidar + odometry + SLAM + explorer + ToF + dashboard ([arguments](#2-run)) |
+| `rover_bringup/preflight.py` (`ros2 run rover_bringup preflight [--motion] [--apply]`) | field-readiness checks (used by `field_test.sh`) |
 | `rover_bringup/setup_serial_ports.py` (`ros2 run rover_bringup setup_serial_ports [--install]`) | detects ESP32 vs. lidar and writes udev rules for `/dev/rover_esp32`, `/dev/rover_lidar` |
 | `scripts/install_service.sh [--remove]` | systemd service `autonav` that runs the launch file at boot (domain 7, CycloneDDS) |
 
@@ -508,7 +535,7 @@ TF tree: `map → odom` (slam_toolbox) → `base_link` (laser_odometry) → `las
 4. **Measure the rover**: `robot_radius`, real `lin_speed` and `ang_speed` → `rover_nav/config/explorer.yaml`. Slower turning gives sharper scans and better maps.
 5. **ToF**: remove the protective film, set the mount height / tilt in `vl53l5cx_ros/config/vl53l5cx.yaml`, run `/tof/calibrate_floor`, and verify with `tof_matrix_viewer`. Until then set `use_tof: false` in the explorer config.
 6. **Map manually first** (`mapping.launch.py`, drive from the dashboard), save, then test `localization.launch.py` from different start positions.
-7. **First autonomous run**: `ros2 launch rover_bringup autonomous_mapping.launch.py`, press *Start* in the dashboard, keep a hand near *Stop* (or any drive key).
+7. **First autonomous run**: `./field_test.sh --motion --apply`, then `./field_test.sh --record`, press *Start* in the dashboard, keep a hand near *Stop* (or any drive key).
 
 ---
 

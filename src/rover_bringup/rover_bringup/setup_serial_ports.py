@@ -52,16 +52,18 @@ def probe(dev):
         print(f'  {dev}: cannot open ({e}) - stop ROS nodes using it and retry')
         return None
     try:
-        data = b''
-        end = time.time() + 2.0
-        while time.time() < end:
+        # Opening the port can reboot the ESP32; it is then silent for ~5 s while the IMU
+        # calibrates. Listen for up to 8 s and ask for help text twice before calling it a lidar.
+        data, asked = b'', 0
+        start = time.time()
+        while time.time() - start < 8.0:
             data += s.read(512)
-        if not looks_like_esp32(data.decode(errors='replace')):
-            s.write(b'h\n')            # stream may be off: ask the ESP32 for its help text
-            end = time.time() + 1.5
-            while time.time() < end:
-                data += s.read(512)
-        return 'esp32' if looks_like_esp32(data.decode(errors='replace')) else 'lidar'
+            if looks_like_esp32(data.decode(errors='replace')):
+                return 'esp32'
+            if (asked == 0 and time.time() - start > 1.5) or (asked == 1 and time.time() - start > 6.0):
+                s.write(b'h\n')
+                asked += 1
+        return 'lidar'
     finally:
         s.close()
 
@@ -72,7 +74,7 @@ def main():
     if not devs:
         sys.exit('No USB serial devices found. Plug in the ESP32 and the lidar.')
     found = {}
-    print('Probing serial devices (2-4 s each)...')
+    print('Probing serial devices (up to 8 s each)...')
     for dev in devs:
         role = probe(dev)
         path = id_path(dev)

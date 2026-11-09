@@ -42,6 +42,11 @@ class Esp32Bridge(Node):
         self.use_safety = p('use_tof_safety', False)
         self.deadband = p('cmd_vel_deadband', 0.05)
         self.imu_frame = p('imu_frame', 'imu_link')
+        self.drive_pwm = int(p('drive_pwm', 0))   # 0 = keep the firmware default (200)
+        self.fw_watchdog_ms = int(p('esp32_watchdog_ms', 1000))   # ESP32 stops by itself; 0 = off
+        self.heartbeat_s = p('heartbeat_s', 0.3)
+        self.last_write = 0.0
+        self.last_rx_line = ''
 
         self.ser = None
         self.rx_buf = b''
@@ -79,10 +84,26 @@ class Esp32Bridge(Node):
             self.ser = s
             self.sent = None
             self.get_logger().info(f'Opened {self.port}')
+            self._send_setup()
         except (serial.SerialException, OSError) as e:
             self.ser = None
             self.get_logger().error(f'Cannot open {self.port}: {e} (retrying)',
                                     throttle_duration_sec=5.0)
+
+    def _send_setup(self):
+        # Settings the firmware forgets when it reboots:
+        #  - 'v': speed used by w/a/s/d
+        #  - 'wd': the ESP32 stops the motors by itself if no motor command arrives in time.
+        #    The bridge re-sends the current command every heartbeat_s, so if the Pi, this node
+        #    or the USB link dies, the rover stops within esp32_watchdog_ms.
+        if self.ser is None:
+            return
+        try:
+            if self.drive_pwm > 0:
+                self.ser.write(f'v {max(0, min(255, self.drive_pwm))}\n'.encode())
+            self.ser.write(f'wd {max(0, self.fw_watchdog_ms)}\n'.encode())
+        except (serial.SerialException, OSError):
+            pass
 
     def _write(self, c):
         if self.ser is None:
@@ -96,6 +117,7 @@ class Esp32Bridge(Node):
         if c != self.sent:
             self.get_logger().info(f'-> {c} ({NAMES[c]})')
         self.sent = c
+        self.last_write = time.monotonic()
         self.pub_sent.publish(String(data=c))
 
     def _close(self):
@@ -147,6 +169,10 @@ class Esp32Bridge(Node):
         if self.use_safety and self.sent == 'w' and (self.obstacle or self.cliff):
             self.get_logger().warn(f'{"Cliff" if self.cliff else "Obstacle"} - stopping')
             self._write('x')
+        # heartbeat: keep the ESP32 watchdog fed while moving
+        if (self.fw_watchdog_ms > 0 and self.sent in ('w', 's', 'a', 'd')
+                and time.monotonic() - self.last_write > self.heartbeat_s):
+            self._write(self.sent)
         # read anything the ESP32 prints
         try:
             data = self.ser.read(256)
@@ -164,8 +190,12 @@ class Esp32Bridge(Node):
                 if text[0].isdigit():
                     self._publish_imu(text)      # CSV IMU sample - don't log
                 else:
-                    self.get_logger().info(f'ESP32: {text}')
-                    self.pub_rx.publish(String(data=text))
+                    if text != self.last_rx_line:       # heartbeat re-sends repeat the same ack
+                        self.get_logger().info(f'ESP32: {text}')
+                        self.pub_rx.publish(String(data=text))
+                    self.last_rx_line = text
+                    if 'calibration complete' in text or 'IMU init failed' in text:
+                        self._send_setup()   # ESP32 rebooted: restore speed + watchdog
 
     def _publish_imu(self, text):
         try:

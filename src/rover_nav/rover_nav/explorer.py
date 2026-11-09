@@ -77,7 +77,7 @@ class Explorer(Node):
         self.hz = p('control_hz', 10.0)
         self.loop_min = p('loop_min_length', 2.5)
         self.loop_radius = p('loop_close_radius', 0.35)
-        self.max_follow = p('max_follow_length', 80.0)
+        self.max_follow = p('max_follow_length', 300.0)
         self.island_min_area = p('island_min_area', 0.02)
         self.frontier_min = p('frontier_min_cells', 8)
         self.goal_tol = p('goal_tolerance', 0.2)
@@ -151,6 +151,7 @@ class Explorer(Node):
         self.prev_err = None
         self.info = ''
         self.last_plan = {}
+        self.halt_ticks = 0
 
     def _set(self, state, info=''):
         if state != self.state:
@@ -227,9 +228,13 @@ class Explorer(Node):
     def _tick(self):
         st = self.state
         if st in ('IDLE', 'DONE', 'STOPPED'):
-            if st != 'IDLE':
+            # Send "stop" a few times when halting, then go quiet so manual driving
+            # (teleop / dashboard) is not overridden by a stream of zero commands.
+            if st != 'IDLE' and self.halt_ticks < 3:
                 self.drive(0, 0)
+                self.halt_ticks += 1
             return self._publish_state()
+        self.halt_ticks = 0
         pose, polar = self.pose(), self.scan_polar()
         if pose is None or polar is None:
             self.drive(0, 0)
