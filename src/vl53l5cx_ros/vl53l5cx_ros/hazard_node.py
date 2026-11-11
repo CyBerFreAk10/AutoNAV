@@ -17,6 +17,8 @@ Service     tof/calibrate_floor (std_srvs/Trigger): with the robot on flat, clea
 import os
 import threading
 import time
+import warnings
+from collections import deque
 
 import numpy as np
 import rclpy
@@ -66,6 +68,11 @@ class HazardNode(Node):
         self.cliff_max_floor = p('cliff_max_floor_range', 0.80)
         self.invalid_is_cliff = p('invalid_is_cliff', True)
         self.min_zones = p('min_zones', 2)
+        # obstacles need this many zones to agree (cliffs keep min_zones)
+        self.obst_min_zones = p('obstacle_min_zones', self.min_zones)
+        # per-zone median over the last N frames (1 = off): one bad reading can't trigger
+        self.smooth_n = max(1, int(p('smoothing_frames', 3)))
+        self._hist = deque(maxlen=self.smooth_n)
         self.debounce_n = p('debounce_frames', 2)
         self.cliff_marker_z = p('cliff_marker_height', 0.05)
         self.calib_file = os.path.expanduser(p('calibration_file', '~/.ros/vl53l5cx_floor.yaml'))
@@ -164,6 +171,18 @@ class HazardNode(Node):
                 self._collect.append(r)
                 return  # don't trigger hazards while calibrating
 
+        if self.smooth_n > 1:
+            if self._hist and self._hist[-1].shape != r.shape:
+                self._hist.clear()
+            self._hist.append(r)
+            stack = np.stack(self._hist)
+            valid_n = np.isfinite(stack).sum(axis=0)
+            with warnings.catch_warnings():   # all-NaN zones -> NaN, without a warning
+                warnings.simplefilter('ignore', RuntimeWarning)
+                med = np.nanmedian(stack, axis=0)
+            # a zone counts as "no return" only if most recent frames had no return
+            r = np.where(valid_n * 2 > len(self._hist), med, np.nan)
+
         if self.geo is None or self.geo.n != n:
             self.geo = TofGeometry(n, self.height, self.tilt_deg, self.model, self.fov,
                                    self.x_off, self.y_off)
@@ -184,7 +203,7 @@ class HazardNode(Node):
         cls[cliff] = CLIFF
         cls[obst] = OBSTACLE
 
-        obstacle = self.obst_db.update(int(obst.sum()) >= self.min_zones)
+        obstacle = self.obst_db.update(int(obst.sum()) >= self.obst_min_zones)
         cliff_on = self.cliff_db.update(int(cliff.sum()) >= self.min_zones)
         nearest = float(fwd[obst].min()) if obst.any() else float('inf')
 
