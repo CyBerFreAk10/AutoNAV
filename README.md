@@ -86,12 +86,10 @@ AutoNav is a fully autonomous ground vehicle designed for comprehensive warehous
 
 | Signal | ESP32 GPIO | Function |
 |---|---|---|
-| ENA | 32 | Left PWM |
-| IN1 / IN2 | 33 / 25 | Left direction |
-| ENB | 14 | Right PWM |
-| IN3 / IN4 | 26 / 27 | Right direction |
+| IN1 / IN2 | 32 / 33 | Left motor (PWM + direction) |
+| IN3 / IN4 | 25 / 26 | Right motor (PWM + direction) |
 
-> The pin comment block in the firmware (and earlier versions of this README) list ENA 25, IN1 26, IN2 27, IN3 33, IN4 32. The `#define`s above are what the code actually uses - verify against your wiring. ENA/ENB jumpers on the L298N must be removed for PWM control.
+> ENA/ENB jumpers stay **on** (enables tied high). Speed and direction come from PWM on the IN pins: forward = PWM on IN1/IN3 with IN2/IN4 low, reverse the other way round. Both low = brake.
 
 **IMU (ICM-20948)**: SDA GPIO 21, SCL GPIO 22, 3.3 V logic.
 
@@ -119,7 +117,7 @@ Commands are **line-based** (terminate with Enter / `\n`). Status replies start 
 | `s` / `b` `[ms]` | Backward |
 | `a` / `l` `[ms]` | Spin left |
 | `d` / `r` `[ms]` | Spin right |
-| `x` / `stop` | Stop (coast) |
+| `x` / `stop` | Stop (brake) |
 | `m <L> <R>` | Raw signed PWM per side, -255..255 |
 | `v [0-255]` | Set / show the speed used by w/a/s/d/test (default 200) |
 | `wd <ms>` | Stop if no motor command arrives within `ms` (0 = off, default off) |
