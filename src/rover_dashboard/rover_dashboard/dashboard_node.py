@@ -389,9 +389,13 @@ class Dashboard(Node):
                  'end': self._clean_pose(route['end']),
                  'waypoints': [self._clean_pose(p) for p in route.get('waypoints', [])]}
         steps = []
-        info = self.map_info(map_name)
+        live = map_name is None   # live SLAM map: slam_toolbox already provides map + localization
+        if live:
+            set_initial_pose = load_map = False
+            steps.append('live SLAM map: skipping map_server load and /initialpose')
 
         if load_map:
+            info = self.map_info(map_name)
             if self.load_map_client.service_is_ready():
                 req = LoadMap.Request()
                 req.map_url = info['yaml']
@@ -417,7 +421,7 @@ class Dashboard(Node):
         self.pub_route.publish(path)
         steps.append(f'route published to /rover/route ({len(path.poses)} poses)')
 
-        nav = {'route': rname, 'map': map_name}
+        nav = {'route': rname, 'map': map_name or 'live SLAM map'}
         if self.nav_client.server_is_ready():
             goal = NavigateThroughPoses.Goal()
             goal.poses = poses
@@ -520,6 +524,11 @@ def make_handler(node, web_dir):
                     return self._send(200, {'maps': node.list_maps(), 'dir': node.maps_dir})
                 if method == 'POST' and api == ['maps', 'save']:
                     return self._send(200, {'saved': node.save_live_map(self._body().get('name', ''))})
+                if method == 'POST' and api == ['live', 'go']:
+                    b = self._body()
+                    if not b.get('route'):
+                        return self._send(400, {'error': 'no route'})
+                    return self._send(200, {'steps': node.go(None, b['route'], b.get('name') or '(unsaved)')})
                 if method == 'POST' and api == ['nav', 'cancel']:
                     return self._send(200, {'result': node.cancel()})
                 if len(api) >= 3 and api[0] == 'maps':

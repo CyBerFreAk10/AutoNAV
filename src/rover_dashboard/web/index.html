@@ -469,8 +469,8 @@ cv.addEventListener('pointerdown', e => {
   if (!map) return;
   cv.setPointerCapture(e.pointerId);
   const [cx, cy] = local(e);
-  const place = mode !== 'pan' && e.button === 0 && !map.live;
-  if (mode !== 'pan' && map.live) toast('Routes are set on saved maps - save the live map first', true);
+  if (map.live && !img) return;   // live map not received yet: nothing to click on
+  const place = mode !== 'pan' && e.button === 0;
   const [wx, wy] = screenToWorld(cx, cy);
   drag = {sx: cx, sy: cy, cx, cy, ox: view.ox, oy: view.oy, place, wx, wy, moved: false};
 });
@@ -538,7 +538,8 @@ $('saveRouteBtn').onclick = async () => {
 };
 $('goBtn').onclick = async () => {
   try {
-    const r = await api(`maps/${map.name}/go`, {method: 'POST', body: {
+    if (!map) return toast('Pick a map first', true);
+    const r = await api(map.live ? 'live/go' : `maps/${map.name}/go`, {method: 'POST', body: {
       route: routeBody(), name: $('routeName').value.trim() || null,
       set_initial_pose: $('optInit').checked, load_map: $('optLoad').checked}});
     toast(r.steps.join('\n'));
