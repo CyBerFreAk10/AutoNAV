@@ -33,11 +33,29 @@ def id_path(dev):
     return m.group(1) if m else None
 
 
-def looks_like_esp32(text):
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    csv = sum(1 for ln in lines if ln[0].isdigit() and ln.count(',') == 8)
-    hashes = sum(1 for ln in lines if ln.startswith('#'))
-    return csv >= 2 or hashes >= 1
+CSV_RE = re.compile(r'^\d+(,-?\d+(\.\d+)?){8}$')
+
+
+def printable_ratio(data):
+    return sum(32 <= b < 127 or b in (9, 10, 13) for b in data) / max(len(data), 1)
+
+
+def looks_like_esp32(data):
+    """True for ESP32_Code.ino output: readable text with '#' status lines or IMU CSV.
+
+    The lidar streams binary that, read at the wrong baud rate, is mostly unprintable and
+    can contain '#' bytes by chance, so the text must be overwhelmingly printable too.
+    """
+    if len(data) < 16 or printable_ratio(data) < 0.85:
+        return False
+    lines = [ln.strip() for ln in data.decode('ascii', errors='replace').splitlines() if ln.strip()]
+    csv = sum(1 for ln in lines if CSV_RE.match(ln))
+    status = sum(1 for ln in lines if ln.startswith('# ') and ln.isprintable() and len(ln) > 4)
+    return csv >= 2 or status >= 1
+
+
+def looks_binary(data):
+    return len(data) > 2000 and printable_ratio(data) < 0.6
 
 
 def probe(dev):
@@ -45,8 +63,7 @@ def probe(dev):
     try:
         s = serial.Serial()
         s.port, s.baudrate, s.timeout = dev, 115200, 0.1
-        s.dtr = False      # don't reboot the ESP32
-        s.rts = False
+        # DTR/RTS deliberately left untouched: changing them reboots the ESP32
         s.open()
     except (serial.SerialException, OSError) as e:
         print(f'  {dev}: cannot open ({e}) - stop ROS nodes using it and retry')
@@ -58,8 +75,10 @@ def probe(dev):
         start = time.time()
         while time.time() - start < 8.0:
             data += s.read(512)
-            if looks_like_esp32(data.decode(errors='replace')):
+            if looks_like_esp32(data):
                 return 'esp32'
+            if looks_binary(data):      # a stream of binary packets: the lidar
+                return 'lidar'
             if (asked == 0 and time.time() - start > 1.5) or (asked == 1 and time.time() - start > 6.0):
                 s.write(b'h\n')
                 asked += 1

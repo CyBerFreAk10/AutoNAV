@@ -260,8 +260,7 @@ class Esp32Reader:
         import serial
         s = serial.Serial()
         s.port, s.baudrate, s.timeout = port, 115200, 0.05
-        s.dtr = s.rts = False
-        s.open()
+        s.open()           # DTR/RTS untouched: changing them reboots the ESP32
         self.ser, self.lock = s, threading.Lock()
         self.samples, self.lines, self.run = [], [], True
         threading.Thread(target=self._loop, daemon=True).start()
@@ -316,22 +315,39 @@ def check_esp32(r, port):
         r.add(FAIL, 'Open ESP32 port', str(e), 'is another program using it?')
         return None
     esp.send('x')
-    end = time.time() + 9.0           # may have rebooted on open: ~5 s IMU calibration
-    while time.time() < end and len(esp.since(time.time() - 1.0)) < 10:
+    # After a reboot the firmware waits 2 s and calibrates the gyro (2000 samples at ~100 Hz,
+    # ~20 s) before streaming. Wait for that rather than poking it.
+    end = time.time() + 4.0
+    while time.time() < end and not esp.since(time.time() - 1.0):
         time.sleep(0.2)
-    lines = ' | '.join(esp.lines[-4:])
+        if any('calibrating' in ln or 'ESP32 +' in ln for ln in esp.lines):
+            print('        ESP32 is calibrating its gyro (~20 s) - keep the rover still...')
+            end = time.time() + 30.0
+            while time.time() < end and not any('calibration complete' in ln or 'IMU init failed' in ln
+                                                for ln in esp.lines):
+                time.sleep(0.3)
+            end = time.time() + 2.0
     if any('IMU init failed' in ln for ln in esp.lines):
         r.add(FAIL, 'IMU', 'firmware reports "IMU init failed"', 'check ICM-20948 wiring (SDA 21, SCL 22)')
     t0 = time.time()
     time.sleep(2.0)
     s = esp.since(t0)
     if not s:
-        esp.send('q')   # stream might be toggled off
-        time.sleep(1.5)
-        s = esp.since(time.time() - 1.5)
+        # the stream may have been switched off with 'q' (a toggle): ask and read the answer
+        n = len(esp.lines)
+        esp.send('q')
+        time.sleep(0.8)
+        reply = ' '.join(esp.lines[n:])
+        if 'stream OFF' in reply:          # it was on (just silent) - restore it
+            esp.send('q')
+            time.sleep(0.5)
+        t0 = time.time()
+        time.sleep(2.0)
+        s = esp.since(t0)
+    lines = ' | '.join(esp.lines[-4:])
     if not s:
         r.add(FAIL, 'IMU stream', f'no CSV samples (last lines: {lines or "none"})',
-              "send 'q' to enable the stream; check the firmware")
+              'check the firmware / IMU; type h in a serial monitor to see its state')
         return esp
     rate = len(s) / 2.0
     v = [x[1] for x in s]
