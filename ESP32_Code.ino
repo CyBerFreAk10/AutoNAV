@@ -33,16 +33,16 @@ bool streamOn = true;
 
 // ================= L298N =================
 //
-// D25 -> ENA   D26 -> IN1   D27 -> IN2    (motor A = left side)
-// D33 -> IN3   D32 -> IN4   D14 -> ENB    (motor B = right side)
+// D32 -> IN1   D33 -> IN2    (motor A = left side)
+// D25 -> IN3   D26 -> IN4    (motor B = right side)
 //
-// ENA/ENB jumpers on the L298N board must be removed for speed control.
+// ENA/ENB jumpers stay ON at the L298N (enables tied high).
+// Speed is set by PWM on the IN pins.
 
 #define IN1 32
 #define IN2 33
 #define IN3 25
 #define IN4 26
-// ENA / ENB: jumpers ON at the L298N, no wires
 
 int driveSpeed = 200;              // PWM 0-255 used by w/a/s/d and test
 int curL = 0, curR = 0;            // last applied signed PWM per side
@@ -60,19 +60,21 @@ unsigned long testStepStart = 0;
 
 // ---- low level ----
 
-// spd: -255..255. Positive = forward. 0 = coast.
-void setChannel(uint8_t en, uint8_t inA, uint8_t inB, int spd) {
+// spd: -255..255. Positive = forward. 0 = brake (enables are tied high).
+// analogWrite on both pins: after a pin has been used for PWM,
+// digitalWrite does not reliably override it on the ESP32.
+void setChannel(uint8_t inA, uint8_t inB, int spd) {
   spd = constrain(spd, -255, 255);
-  digitalWrite(inA, spd > 0 ? HIGH : LOW);
-  digitalWrite(inB, spd < 0 ? HIGH : LOW);
-  analogWrite(en, abs(spd));
+  if (spd > 0)      { analogWrite(inA, spd); analogWrite(inB, 0);    }
+  else if (spd < 0) { analogWrite(inA, 0);   analogWrite(inB, -spd); }
+  else              { analogWrite(inA, 0);   analogWrite(inB, 0);    }
 }
 
 void drive(int left, int right) {
   curL = constrain(left,  -255, 255);
   curR = constrain(right, -255, 255);
-  setChannel(ENA, IN1, IN2, curL);
-  setChannel(ENB, IN3, IN4, curR);
+  setChannel(IN1, IN2, curL);
+  setChannel(IN3, IN4, curR);
 }
 
 void motorStop() {
@@ -270,7 +272,7 @@ void printHelp() {
     "# ---- commands (terminate with Enter) ----\n"
     "# w|f [ms]    forward        s|b [ms]   backward\n"
     "# a|l [ms]    spin left      d|r [ms]   spin right\n"
-    "# x|stop      stop (coast)\n"
+    "# x|stop      stop (brake)\n"
     "# m <L> <R>   raw signed PWM per side, -255..255\n"
     "# v [0-255]   set/show speed used by w/a/s/d/test\n"
     "# wd <ms>     stop if no motor cmd within ms (0 = off)\n"
@@ -383,16 +385,10 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  pinMode(ENA, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(ENB, OUTPUT);
-  motorStop();
+  motorStop();               // analogWrite sets the IN pins up as PWM outputs
 
   Wire.begin(21, 22);
-  Wire.setClock(400000);
+  Wire.setClock(100000);     // 100 kHz: more tolerant of motor noise than 400 kHz
   delay(100);
 
   Serial.println("\n# ESP32 + ICM-20948 + L298N");
