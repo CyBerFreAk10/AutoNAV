@@ -6,7 +6,9 @@ Sends single-character drive commands over USB serial:
 Subscribes
   rover/cmd   std_msgs/String       'w' | 's' | 'a' | 'd' | 'x'
   cmd_vel     geometry_msgs/Twist   mapped to the same letters (works with teleop_twist_keyboard)
-  tof/obstacle_detected, tof/cliff_detected (std_msgs/Bool)  only if use_tof_safety
+  tof/obstacle_detected, tof/cliff_detected (std_msgs/Bool)  only if use_tof_safety:
+    forward ('w') is blocked / stopped while either is true, or while no ToF update has
+    arrived for tof_timeout_s (fail-safe). Backing up and turning stay allowed.
 Publishes
   rover/sent        std_msgs/String  every command actually written to the ESP32
   rover/esp32_rx    std_msgs/String  '#' status lines the ESP32 prints (for debugging)
@@ -17,6 +19,7 @@ Safety
   - sends 'x' on shutdown
 """
 import math
+import os
 import time
 
 import rclpy
@@ -34,12 +37,16 @@ class Esp32Bridge(Node):
     def __init__(self):
         super().__init__('esp32_bridge')
         p = lambda n, d: self.declare_parameter(n, d).value  # noqa: E731
-        self.port = p('port', '/dev/ttyUSB0')
+        # /dev/rover_esp32 follows the physical USB port (udev rule from setup_serial_ports);
+        # ttyUSB numbers swap between the ESP32 and the lidar when the USB devices re-enumerate.
+        self.port = p('port', '/dev/rover_esp32' if os.path.exists('/dev/rover_esp32')
+                      else '/dev/ttyUSB0')
         self.baud = p('baud', 115200)
         self.eol = p('line_ending', '\\n').encode().decode('unicode_escape')
         self.watchdog_s = p('watchdog_s', 0.5)
         self.reset_on_open = p('reset_on_open', False)
-        self.use_safety = p('use_tof_safety', False)
+        self.use_safety = p('use_tof_safety', True)
+        self.tof_timeout_s = p('tof_timeout_s', 1.0)   # no ToF data this long = unsafe
         self.deadband = p('cmd_vel_deadband', 0.05)
         self.imu_frame = p('imu_frame', 'imu_link')
         self.drive_pwm = int(p('drive_pwm', 0))   # 0 = keep the firmware default (200)
@@ -53,6 +60,7 @@ class Esp32Bridge(Node):
         self.sent = None          # last char written
         self.last_cmd_time = 0.0
         self.obstacle = self.cliff = False
+        self.last_tof = 0.0
 
         self.pub_sent = self.create_publisher(String, 'rover/sent', 10)
         self.pub_rx = self.create_publisher(String, 'rover/esp32_rx', 10)
@@ -60,10 +68,8 @@ class Esp32Bridge(Node):
         self.create_subscription(String, 'rover/cmd', self._on_char, 10)
         self.create_subscription(Twist, 'cmd_vel', self._on_twist, 10)
         if self.use_safety:
-            self.create_subscription(Bool, 'tof/obstacle_detected',
-                                     lambda m: setattr(self, 'obstacle', m.data), 10)
-            self.create_subscription(Bool, 'tof/cliff_detected',
-                                     lambda m: setattr(self, 'cliff', m.data), 10)
+            self.create_subscription(Bool, 'tof/obstacle_detected', self._on_obstacle, 10)
+            self.create_subscription(Bool, 'tof/cliff_detected', self._on_cliff, 10)
 
         self._open()
         self.create_timer(0.05, self._tick)
@@ -76,8 +82,9 @@ class Esp32Bridge(Node):
         try:
             s = serial.Serial()
             s.port, s.baudrate, s.timeout, s.write_timeout = self.port, self.baud, 0, 0.2
-            if not self.reset_on_open:
-                # ESP32 dev boards reboot when DTR/RTS toggle on open; keep them released.
+            if self.reset_on_open:
+                # Toggling DTR/RTS on open triggers the ESP32 auto-reset circuit (reboot +
+                # ~22 s IMU calibration). Left untouched, the port opens without a reboot.
                 s.dtr = False
                 s.rts = False
             s.open()
@@ -100,8 +107,8 @@ class Esp32Bridge(Node):
             return
         try:
             if self.drive_pwm > 0:
-                self.ser.write(f'v {max(0, min(255, self.drive_pwm))}\n'.encode())
-            self.ser.write(f'wd {max(0, self.fw_watchdog_ms)}\n'.encode())
+                self.ser.write(f'\nv {max(0, min(255, self.drive_pwm))}\n'.encode())
+            self.ser.write(f'\nwd {max(0, self.fw_watchdog_ms)}\n'.encode())
         except (serial.SerialException, OSError):
             pass
 
@@ -109,7 +116,10 @@ class Esp32Bridge(Node):
         if self.ser is None:
             return
         try:
-            self.ser.write((c + self.eol).encode())
+            # Leading newline: the ESP32 then treats any line noise already in its buffer as a
+            # separate (rejected) line instead of gluing it onto this command. Empty lines are
+            # ignored by the firmware.
+            self.ser.write(('\n' + c + self.eol).encode())
         except (serial.SerialException, OSError) as e:
             self.get_logger().error(f'Serial write failed: {e}')
             self._close()
@@ -128,13 +138,31 @@ class Esp32Bridge(Node):
             pass
         self.ser = None
 
+    # ------------------------------------------------------------------ ToF safety
+    def _on_obstacle(self, m):
+        self.obstacle, self.last_tof = m.data, time.monotonic()
+
+    def _on_cliff(self, m):
+        self.cliff, self.last_tof = m.data, time.monotonic()
+
+    def _hazard(self):
+        """Why forward driving is unsafe right now, or None."""
+        if not self.use_safety:
+            return None
+        if time.monotonic() - self.last_tof > self.tof_timeout_s:
+            return 'no ToF data'
+        if self.cliff:
+            return 'cliff'
+        if self.obstacle:
+            return 'obstacle'
+        return None
+
     # ------------------------------------------------------------------ commands
     def _command(self, c):
         self.last_cmd_time = time.monotonic()
-        if c == 'w' and self.use_safety and (self.obstacle or self.cliff):
-            self.get_logger().warn(
-                f'Forward blocked: {"cliff" if self.cliff else "obstacle"} ahead',
-                throttle_duration_sec=1.0)
+        hazard = self._hazard() if c == 'w' else None
+        if hazard:
+            self.get_logger().warn(f'Forward blocked: {hazard}', throttle_duration_sec=1.0)
             c = 'x'
         if c != self.sent:   # ESP32 keeps doing the last command, so only send changes
             self._write(c)
@@ -166,8 +194,9 @@ class Esp32Bridge(Node):
             self.get_logger().warn('No commands received - stopping (watchdog)')
             self._write('x')
         # safety while already driving forward
-        if self.use_safety and self.sent == 'w' and (self.obstacle or self.cliff):
-            self.get_logger().warn(f'{"Cliff" if self.cliff else "Obstacle"} - stopping')
+        hazard = self._hazard() if self.sent == 'w' else None
+        if hazard:
+            self.get_logger().warn(f'{hazard} - stopping')
             self._write('x')
         # heartbeat: keep the ESP32 watchdog fed while moving
         if (self.fw_watchdog_ms > 0 and self.sent in ('w', 's', 'a', 'd')
@@ -175,7 +204,9 @@ class Esp32Bridge(Node):
             self._write(self.sent)
         # read anything the ESP32 prints
         try:
-            data = self.ser.read(256)
+            # Drain everything waiting: the IMU stream (~100 lines/s, ~5.5 kB/s) outruns a fixed
+            # 256 bytes per 50 ms tick, and an overflowing tty buffer drops bytes mid-line.
+            data = self.ser.read(max(1, self.ser.in_waiting))
         except (serial.SerialException, OSError) as e:
             self.get_logger().error(f'Serial read failed: {e}')
             self._close()

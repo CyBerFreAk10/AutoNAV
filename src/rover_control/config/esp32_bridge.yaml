@@ -1,12 +1,13 @@
 esp32_bridge:
   ros__parameters:
     # autonomous_mapping.launch.py uses /dev/rover_esp32 (see setup_serial_ports) when it exists
-    port: /dev/ttyUSB0
+    port: /dev/rover_esp32   # fixed name by USB port; ttyUSB0/1 can swap with the lidar
     baud: 115200
     line_ending: "\n"        # ESP32_Code.ino reads whole lines (CR or LF)
     watchdog_s: 0.5          # send 'x' if no command arrives for this long (0 = off)
-    reset_on_open: false     # false = don't reboot the ESP32 when the port opens
-    use_tof_safety: false    # true = block 'w' while tof/obstacle_detected or tof/cliff_detected
+    reset_on_open: false     # true = reboot the ESP32 on connect (then ~22 s gyro calibration)
+    use_tof_safety: true     # block/stop 'w' while tof/obstacle_detected or tof/cliff_detected
+    tof_timeout_s: 1.0       # ...or while the ToF node has been silent this long (fail-safe)
     cmd_vel_deadband: 0.05
     esp32_watchdog_ms: 1000  # ESP32 stops on its own if the Pi/bridge/USB dies (0 = off)
     heartbeat_s: 0.3         # re-send the current motion command this often while moving
