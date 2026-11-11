@@ -17,9 +17,10 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     params = os.path.join(get_package_share_directory('vl53l5cx_ros'), 'config', 'vl53l5cx.yaml')
-    cfg = LaunchConfiguration('params_file')
+    cfg = LaunchConfiguration('tof_params_file')
     return LaunchDescription([
-        DeclareLaunchArgument('params_file', default_value=params),
+        # own name: a generic 'params_file' set by another include (e.g. the lidar) would leak in here
+        DeclareLaunchArgument('tof_params_file', default_value=params),
         DeclareLaunchArgument('viewer', default_value='none', description='none | heatmap'),
         DeclareLaunchArgument('hazards', default_value='true'),
         Node(package='vl53l5cx_ros', executable='vl53l5cx_node', name='vl53l5cx_node',

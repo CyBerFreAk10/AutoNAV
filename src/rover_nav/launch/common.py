@@ -4,7 +4,7 @@ import tempfile
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from launch.actions import IncludeLaunchDescription
+from launch.actions import GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -33,10 +33,11 @@ def sensors(sim, world, start, lidar_port=''):
         yaml.safe_dump(cfg, tmp)
         tmp.close()
         params = tmp.name
-    return [IncludeLaunchDescription(
+    # Scoped group: keeps 'params_file' from leaking into includes launched after this one
+    return [GroupAction(scoped=True, actions=[IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ydlidar_ros2_driver'), 'launch', 'ydlidar_launch.py')),
-        launch_arguments={'params_file': params}.items())]
+        launch_arguments={'params_file': params}.items())])]
 
 
 def odometry():
