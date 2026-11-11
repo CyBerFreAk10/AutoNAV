@@ -38,12 +38,11 @@ bool streamOn = true;
 //
 // ENA/ENB jumpers on the L298N board must be removed for speed control.
 
-#define ENA 32
-#define IN1 33
-#define IN2 25
-#define IN3 26
-#define IN4 27
-#define ENB 14
+#define IN1 32
+#define IN2 33
+#define IN3 25
+#define IN4 26
+// ENA / ENB: jumpers ON at the L298N, no wires
 
 int driveSpeed = 200;              // PWM 0-255 used by w/a/s/d and test
 int curL = 0, curR = 0;            // last applied signed PWM per side
