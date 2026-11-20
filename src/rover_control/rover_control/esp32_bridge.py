@@ -54,6 +54,8 @@ class Esp32Bridge(Node):
         self.heartbeat_s = p('heartbeat_s', 0.3)
         self.last_write = 0.0
         self.last_rx_line = ''
+        self.last_good_rx = time.monotonic()   # last readable line from the ESP32
+        self.garbled_bytes = 0                 # bytes received since then
 
         self.ser = None
         self.rx_buf = b''
@@ -90,6 +92,8 @@ class Esp32Bridge(Node):
             s.open()
             self.ser = s
             self.sent = None
+            self.rx_buf = b''
+            self.last_good_rx, self.garbled_bytes = time.monotonic(), 0
             self.get_logger().info(f'Opened {self.port}')
             self._send_setup()
         except (serial.SerialException, OSError) as e:
@@ -128,7 +132,10 @@ class Esp32Bridge(Node):
             self.get_logger().info(f'-> {c} ({NAMES[c]})')
         self.sent = c
         self.last_write = time.monotonic()
-        self.pub_sent.publish(String(data=c))
+        try:
+            self.pub_sent.publish(String(data=c))
+        except Exception:   # during Ctrl-C shutdown the ROS context is already gone
+            pass
 
     def _close(self):
         try:
@@ -212,12 +219,15 @@ class Esp32Bridge(Node):
             self._close()
             return
         if data:
+            self.garbled_bytes += len(data)
             self.rx_buf += data
             *lines, self.rx_buf = self.rx_buf.split(b'\n')
+            self.rx_buf = self.rx_buf[-1024:]   # garbage with no newlines must not pile up
             for line in lines:
                 text = line.decode(errors='replace').strip()
-                if not text:
+                if not text or not text.isprintable():
                     continue
+                self.last_good_rx, self.garbled_bytes = time.monotonic(), 0
                 if text[0].isdigit():
                     self._publish_imu(text)      # CSV IMU sample - don't log
                 else:
@@ -227,6 +237,27 @@ class Esp32Bridge(Node):
                     self.last_rx_line = text
                     if 'calibration complete' in text or 'IMU init failed' in text:
                         self._send_setup()   # ESP32 rebooted: restore speed + watchdog
+
+        self._check_garbled()
+
+    def _check_garbled(self):
+        # Data arriving but no readable line: the CP2102's baud rate is wrong. Seen after USB
+        # re-enumerations during undervoltage, when the chip's set-baud request timed out
+        # (kernel: 'cp210x ... failed set request ... -110'). Re-sending the baud rate fixes it.
+        if self.garbled_bytes > 2000 and time.monotonic() - self.last_good_rx > 2.0:
+            self.get_logger().warn(f'ESP32 output is garbled - re-applying {self.baud} baud')
+            try:
+                self.ser.baudrate = 9600
+                self.ser.baudrate = self.baud
+                self.ser.reset_input_buffer()
+            except (serial.SerialException, OSError) as e:
+                self.get_logger().error(f'Re-applying baud failed: {e}')
+                self._close()
+                return
+            self.rx_buf = b''
+            self.last_good_rx, self.garbled_bytes = time.monotonic(), 0
+            self.sent = None          # resend the current command and the setup
+            self._send_setup()
 
     def _publish_imu(self, text):
         try:

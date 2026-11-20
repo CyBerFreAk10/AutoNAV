@@ -59,7 +59,7 @@ def looks_binary(data):
 
 
 def probe(dev):
-    """'esp32', 'lidar' or None (busy / unreadable)."""
+    """'esp32', 'lidar', 'unknown' (silent / undecided) or None (busy / unreadable)."""
     try:
         s = serial.Serial()
         s.port, s.baudrate, s.timeout = dev, 115200, 0.1
@@ -75,14 +75,18 @@ def probe(dev):
         start = time.time()
         while time.time() - start < 8.0:
             data += s.read(512)
-            if looks_like_esp32(data):
+            # Judge only the latest bytes: the ESP32 sometimes dumps a burst of junk
+            # (e.g. '|p\x00' repeated) right after the port opens, which would otherwise
+            # drag the printable ratio of the whole buffer down for the entire probe.
+            recent = data[-2048:]
+            if looks_like_esp32(recent):
                 return 'esp32'
-            if looks_binary(data):      # a stream of binary packets: the lidar
+            if len(data) > 6000 and looks_binary(recent):   # sustained binary packets: the lidar
                 return 'lidar'
             if (asked == 0 and time.time() - start > 1.5) or (asked == 1 and time.time() - start > 6.0):
                 s.write(b'h\n')
                 asked += 1
-        return 'lidar'
+        return 'lidar' if looks_binary(data[-2048:]) else 'unknown'
     finally:
         s.close()
 
@@ -100,6 +104,9 @@ def main():
         if role is None:
             continue
         print(f'  {dev}: {role.upper():5s}  USB port {path}')
+        if role not in NAMES:
+            print('    (silent or unrecognised output - not assigned)')
+            continue
         if not path:
             print('    (no ID_PATH - cannot make a port-based rule)')
             continue
