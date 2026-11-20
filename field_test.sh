@@ -4,6 +4,8 @@
 #   ./field_test.sh                    preflight checks, then launch (explorer waits for Start)
 #   ./field_test.sh --motion           + short timed moves to measure speeds and check directions
 #   ./field_test.sh --motion --apply   + save the measured speeds to explorer.yaml
+#   ./field_test.sh --calibrate-tof    + measure the ToF height/tilt from the floor and save it
+#                                        (rover on flat floor, ~1 m clear ahead; redo when the sensor moves)
 #   ./field_test.sh --record           + record a rosbag of the run to ~/autonav_logs (for debugging)
 #   ./field_test.sh --check-only       only run the checks
 #   ./field_test.sh --force            launch even if a check FAILs
@@ -21,12 +23,12 @@ LAUNCH_ARGS=()
 CHECKS=1 FORCE=0 ONLY=0 RECORD=0
 for a in "$@"; do
   case "$a" in
-    --motion|--apply|--yes) CHECK_ARGS+=("$a") ;;
+    --motion|--apply|--yes|--calibrate-tof) CHECK_ARGS+=("$a") ;;
     --force) FORCE=1 ;;
     --check-only) ONLY=1 ;;
     --skip-checks) CHECKS=0 ;;
     --record) RECORD=1 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) LAUNCH_ARGS+=("$a") ;;
   esac
 done

@@ -4,6 +4,8 @@
   ros2 run rover_bringup preflight --motion       # + short timed moves to measure speed / turn
                                                   #   rate and check motor, lidar and IMU directions
   ros2 run rover_bringup preflight --motion --apply   # + write measured speeds to explorer.yaml
+  ros2 run rover_bringup preflight --calibrate-tof    # + measure ToF height/tilt from the floor
+                                                  #   (rover on flat floor, ~1 m clear ahead)
 
 Results are PASS / WARN / FAIL. Exit code 1 if anything FAILs.
 Stop the running stack first (the checks need the serial ports and the I2C sensor).
@@ -213,7 +215,7 @@ def check_config(r):
               f"{c.get('tilt_down_deg')} deg ({c.get('calibrated', '?')})")
     else:
         r.add(WARN, 'ToF floor calibration', 'not done (using vl53l5cx.yaml numbers)',
-              'with the stack running: ros2 service call /tof/calibrate_floor std_srvs/srv/Trigger')
+              'field_test.sh --calibrate-tof  (rover on flat floor, ~1 m clear ahead)')
     maps = sorted(glob.glob(os.path.expanduser('~/maps/*.posegraph')))
     r.add(INFO, 'Saved maps', ', '.join(os.path.basename(m)[:-10] for m in maps) or 'none yet')
 
@@ -365,7 +367,19 @@ def check_esp32(r, port):
 
 
 # ====================================================================== ToF
-def check_tof(r):
+def tof_params():
+    """flip / fov / calibration_file settings from vl53l5cx.yaml."""
+    import yaml
+    try:
+        c = yaml.safe_load(open(os.path.join(share('vl53l5cx_ros'), 'config', 'vl53l5cx.yaml')))
+    except Exception:
+        c = {}
+    drv = (c.get('vl53l5cx_node') or {}).get('ros__parameters', {})
+    haz = (c.get('tof_hazard_node') or {}).get('ros__parameters', {})
+    return drv, haz
+
+
+def check_tof(r, calibrate=False):
     r.section('VL53L5CX ToF')
     out = sh('i2cdetect -y 1 2>/dev/null')
     present = re.search(r'^20:.*\b29\b', out, re.M) is not None
@@ -373,6 +387,7 @@ def check_tof(r):
           'check wiring (SDA GPIO2, SCL GPIO3, 3.3 V)')
     if not present:
         return
+    want = 30 if calibrate else 10
     try:
         import vl53l5cx_ctypes as vl
         from smbus2 import SMBus
@@ -383,8 +398,8 @@ def check_tof(r):
         dev.start_ranging()
         init_s = time.time() - t0
         frames = []
-        end = time.time() + 3.0
-        while time.time() < end and len(frames) < 10:
+        end = time.time() + 3.0 + want / 10.0
+        while time.time() < end and len(frames) < want:
             if dev.data_ready():
                 d = dev.get_data()
                 frames.append((list(d.distance_mm[0]), list(d.target_status[0])))
@@ -393,8 +408,8 @@ def check_tof(r):
     except Exception as e:
         r.add(FAIL, 'ToF ranging', str(e))
         return
-    r.add(PASS if len(frames) >= 8 else WARN, 'ToF ranging', f'{len(frames)} frames in 3 s '
-          f'(init {init_s:.1f} s)')
+    r.add(PASS if len(frames) >= want * 0.8 else WARN, 'ToF ranging',
+          f'{len(frames)} frames (init {init_s:.1f} s)')
     if not frames:
         return
     dist, stat = frames[-1]
@@ -403,9 +418,89 @@ def check_tof(r):
     if valid and med < 30:
         r.add(FAIL, 'ToF readings', f'median {med} mm - something is on the sensor',
               'remove the protective film / clean the cover')
+        return
+    r.add(PASS if len(valid) >= 32 else WARN, 'ToF readings',
+          f'{len(valid)}/64 valid zones, median {med} mm', 'aim the sensor at the floor ahead')
+    tof_floor(r, frames, calibrate)
+
+
+def tof_floor(r, frames, calibrate):
+    """Per-zone median of the frames (oriented like the driver), then either fit and save the
+    floor calibration, or check that the saved one still matches what the sensor sees."""
+    import numpy as np
+    import yaml
+    from vl53l5cx_ros.geometry import TofGeometry, fit_floor
+    drv, haz = tof_params()
+    valid_st = set(drv.get('valid_statuses', [5, 6, 9]))
+    stack = []
+    for dist, stat in frames:
+        a = np.array([d / 1000.0 if s_ in valid_st else np.nan for d, s_ in zip(dist, stat)])
+        a = a[:64].reshape(8, 8)
+        if drv.get('flip_horizontal'):
+            a = np.fliplr(a)
+        if drv.get('flip_vertical'):
+            a = np.flipud(a)
+        stack.append(a)
+    stack = np.stack(stack)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)   # all-NaN zones -> NaN, as intended
+        med = np.nanmedian(stack, axis=0)
+    med[np.mean(np.isfinite(stack), axis=0) < 0.8] = np.nan
+    fov = float(haz.get('fov_deg', 45.0))
+    cal_file = os.path.expanduser(haz.get('calibration_file', '~/.ros/vl53l5cx_floor.yaml'))
+
+    if calibrate:
+        fits = fit_floor(med, 8, fov)
+        if not fits:
+            r.add(FAIL, 'ToF floor calibration', 'too few valid floor zones',
+                  'tilt the sensor further down at the floor')
+            return
+        res, h, t, model = fits[0]
+        if res > 0.05:
+            flipped = fit_floor(med[::-1], 8, fov)
+            hint = ('rows look upside-down: set flip_vertical: true in vl53l5cx.yaml'
+                    if flipped and flipped[0][0] < res * 0.5 else
+                    'put the rover on flat floor with ~1 m clear ahead (no walls, no feet)')
+            r.add(FAIL, 'ToF floor calibration', f'poor floor fit ({res * 100:.1f}% residual) - '
+                  'not saved', hint)
+            return
+        os.makedirs(os.path.dirname(cal_file), exist_ok=True)
+        with open(cal_file, 'w') as f:
+            yaml.safe_dump({'mount_height_m': round(h, 4), 'tilt_down_deg': round(t, 2),
+                            'range_model': model, 'fit_residual': round(res, 4),
+                            'calibrated': time.strftime('%Y-%m-%d %H:%M:%S') + ' (preflight)'}, f)
+        r.add(PASS, 'ToF floor calibration', f'measured height {h * 100:.1f} cm, tilt {t:.1f} deg '
+              f'({res * 100:.1f}% fit) - saved to {cal_file}')
+    elif not os.path.exists(cal_file):
+        return            # check_config already warned
     else:
-        r.add(PASS if len(valid) >= 32 else WARN, 'ToF readings',
-              f'{len(valid)}/64 valid zones, median {med} mm', 'aim the sensor at the floor ahead')
+        c = yaml.safe_load(open(cal_file)) or {}
+        h, t = float(c.get('mount_height_m', 0.06)), float(c.get('tilt_down_deg', 15.0))
+        model = c.get('range_model', 'perpendicular')
+    # Does the (new or saved) geometry match what the sensor sees? Zones that should see the
+    # floor within 0.6 m are compared with the measurement.
+    geo = TofGeometry(8, h, t, model, fov)
+    exp = geo.floor_range
+    zones = np.isfinite(exp) & (exp < 0.6)
+    if zones.sum() == 0:
+        r.add(WARN, 'ToF cliff coverage', f'tilt {t:.1f} deg: no zone sees the floor within 0.6 m',
+              'tilt the sensor 15-20 deg down, then: field_test.sh --calibrate-tof')
+        return
+    seen = med[zones]
+    missing = int(np.sum(~np.isfinite(seen)))
+    with np.errstate(all='ignore'):
+        err = float(np.nanmedian(np.abs(seen - exp[zones]) / exp[zones])) if missing < zones.sum() else 1.0
+    nearest = float(np.min(exp[zones]))
+    if err > 0.25 or missing > zones.sum() / 2:
+        r.add(WARN, 'ToF matches calibration', f'no - floor zones off by {err * 100:.0f}%, '
+              f'{missing}/{int(zones.sum())} without a return. The sensor has moved (or the floor '
+              'ahead is not clear) -> false cliffs/obstacles', 'on flat clear floor: field_test.sh --calibrate-tof')
+    else:
+        r.add(PASS, 'ToF matches calibration', f'floor zones within {err * 100:.0f}%')
+    r.add(PASS if t >= 10 else WARN, 'ToF cliff coverage',
+          f'tilt {t:.1f} deg, {int(zones.sum())} zones see floor from {nearest * 100:.0f} cm ahead',
+          'tilt the sensor 15-20 deg down for reliable cliff detection')
 
 
 # ====================================================================== lidar
@@ -623,6 +718,7 @@ def motion_test(r, esp, lid, apply, assume_yes):
 def main():
     args = sys.argv[1:]
     motion, apply, yes = '--motion' in args, '--apply' in args, '--yes' in args
+    calibrate_tof = '--calibrate-tof' in args
     r = Report()
     print('AutoNav preflight' + (' + motion test' if motion else '') +
           f"  ({time.strftime('%Y-%m-%d %H:%M')})")
@@ -634,7 +730,7 @@ def main():
         esp_port, lidar_port = find_ports(r)
         if esp_port:
             esp = check_esp32(r, esp_port)
-        check_tof(r)
+        check_tof(r, calibrate_tof)
         if lidar_port:
             lid = check_lidar(r, lidar_port)
         if motion:
