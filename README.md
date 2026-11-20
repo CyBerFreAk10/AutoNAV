@@ -415,6 +415,7 @@ ros2 launch rover_dashboard dashboard.launch.py   # http://<pi-ip>:8080
 * **ESP32 output** and **running nodes**.
 * **Maps**: lists `~/maps` (`.yaml` + `.pgm`), zoom / pan; **Save live map** saves the current SLAM map (image + pose graph).
 * **Autonomous mapping**: explorer state, Start / Stop (with optional map name), Localize now, localization fit; **● Live SLAM map** with explorer boundary and path overlays. Manual driving stops the explorer.
+* **Editing waypoints**: drag any start / waypoint / end marker to move it; **right-click** a marker (or pick *Delete point* and click it) to delete it; in the *Current route* list, ↑ ↓ reorder waypoints and ✕ deletes; **Undo** / Ctrl+Z reverts the last change (Clear and Load too). The route being edited is kept per map in the browser, so a page reload doesn't lose it.
 * **Routes**: *Set start*, *Add waypoint*, *Set end* by clicking on the map (drag to set heading); save named routes per map (`~/maps/<map>.routes.json`); **Go** publishes the start as `/initialpose`, loads the map into `map_server` if running, publishes the route on `/rover/route` (`nav_msgs/Path`) and sends it to Nav2 `navigate_through_poses` if Nav2 is running. **Cancel / stop** cancels navigation and stops the rover.
 
 Config: `config/dashboard.yaml` (`host`, `port`, `maps_dir`, frames). Uses only the Python standard library for HTTP. **There is no login** - anyone on the network can drive the rover; set `host: 127.0.0.1` and use an SSH tunnel on untrusted networks.

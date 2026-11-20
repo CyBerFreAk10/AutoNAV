@@ -66,6 +66,7 @@ select,input{background:var(--bg);border:1px solid var(--line);border-radius:8px
 canvas{display:block;width:100%;height:100%}
 .maphint{position:absolute;left:10px;bottom:8px;font-size:12px;background:var(--panel);
   padding:3px 8px;border-radius:6px;opacity:.9;pointer-events:none}
+[hidden]{display:none!important}
 .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   text-align:center;padding:24px;color:var(--muted)}
 .tools button{min-width:0}
@@ -74,6 +75,7 @@ canvas{display:block;width:100%;height:100%}
 ol.pts{margin:0;padding-left:20px;font-variant-numeric:tabular-nums}
 ol.pts li{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
 ol.pts li button{padding:0 8px;font-size:12px}
+ol.pts li .acts{display:flex;gap:4px;flex-shrink:0}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media (max-width:1200px){.grid2{grid-template-columns:1fr}}
 #toast{position:fixed;right:16px;bottom:16px;max-width:min(420px,calc(100vw - 32px));background:var(--panel);
@@ -171,6 +173,8 @@ ol.pts li button{padding:0 8px;font-size:12px}
       <button data-mode="start">Set start</button>
       <button data-mode="wp">Add waypoint</button>
       <button data-mode="end">Set end</button>
+      <button data-mode="del" title="Click a point on the map to delete it (or right-click it with any tool)">Delete point</button>
+      <button id="undoBtn" title="Undo the last route change (Ctrl+Z)">Undo</button>
       <span class="legend small muted" style="margin-left:auto">
         <span><i style="background:#1f9d55"></i>start</span>
         <span><i style="background:#2f6fde"></i>waypoint</span>
@@ -190,6 +194,7 @@ ol.pts li button{padding:0 8px;font-size:12px}
       <h2>Current route</h2>
       <ol class="pts" id="pts"></ol>
       <p class="small muted" id="noPts">Pick “Set start”, then click on the map. Drag while clicking to set the heading.</p>
+      <p class="small muted">Drag a point to move it · right-click it (or use “Delete point”) to remove it · Ctrl+Z undoes.</p>
       <div class="row" style="margin-top:10px">
         <input id="routeName" placeholder="route name" size="14">
         <button id="saveRouteBtn">Save route</button>
@@ -260,7 +265,7 @@ document.querySelectorAll('#pad [data-c]').forEach(b => {
 document.querySelector('#pad [data-stop]').addEventListener('click', stopDrive);
 const KEYMAP = {w: 'w', a: 'a', s: 's', d: 'd', arrowup: 'w', arrowdown: 's', arrowleft: 'a', arrowright: 'd'};
 addEventListener('keydown', e => {
-  if (e.target.matches('input,select,textarea')) return;
+  if (e.target.closest && e.target.closest('input,select,textarea')) return;
   const k = e.key.toLowerCase();
   if (k === ' ' || k === 'x') {
     e.preventDefault();
@@ -458,25 +463,67 @@ function autoYaws() {
 function setMode(m) {
   mode = m;
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
-  $('hint').textContent = m === 'pan' ? 'Scroll to zoom · drag to pan'
+  $('hint').textContent = m === 'pan' ? 'Scroll to zoom · drag to pan · drag a point to move it'
+    : m === 'del' ? 'Click a start / waypoint / end marker to delete it'
     : `Click to place ${m === 'wp' ? 'a waypoint' : 'the ' + m} · drag to set heading · scroll to zoom`;
   cv.style.cursor = m === 'pan' ? 'grab' : 'crosshair';
 }
 document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 
 const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+/* route points under the cursor: {kind: 'start'|'wp'|'end', i} */
+function hitPoint(cx, cy) {
+  if (!map) return null;
+  const cands = [];
+  if (route.start) cands.push({kind: 'start', p: route.start});
+  route.waypoints.forEach((p, i) => cands.push({kind: 'wp', i, p}));
+  if (route.end) cands.push({kind: 'end', p: route.end});
+  let best = null, bd = 13;
+  cands.forEach(c => {
+    const [sx, sy] = worldToScreen(c.p.x, c.p.y), d = Math.hypot(sx - cx, sy - cy);
+    if (d < bd) { bd = d; best = c; }
+  });
+  return best;
+}
+function deletePoint(h) {
+  pushUndo();
+  if (h.kind === 'start') route.start = null;
+  else if (h.kind === 'end') route.end = null;
+  else route.waypoints.splice(h.i, 1);
+  autoYaws(); renderRoute(); drawMap();
+}
+cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('pointerdown', e => {
   if (!map) return;
   cv.setPointerCapture(e.pointerId);
   const [cx, cy] = local(e);
   if (map.live && !img) return;   // live map not received yet: nothing to click on
-  const place = mode !== 'pan' && e.button === 0;
+  const hit = hitPoint(cx, cy);
+  if (hit && (e.button === 2 || mode === 'del')) { deletePoint(hit); return; }
+  if (e.button === 2) return;
+  if (hit) {                        // grab an existing point to move it
+    pushUndo();
+    drag = {move: hit, sx: cx, sy: cy, moved: false};
+    return;
+  }
+  const place = mode !== 'pan' && mode !== 'del' && e.button === 0;
   const [wx, wy] = screenToWorld(cx, cy);
   drag = {sx: cx, sy: cy, cx, cy, ox: view.ox, oy: view.oy, place, wx, wy, moved: false};
 });
 cv.addEventListener('pointermove', e => {
-  if (!drag) return;
   const [cx, cy] = local(e);
+  if (!drag) {
+    if (map) cv.style.cursor = hitPoint(cx, cy) ? (mode === 'del' ? 'not-allowed' : 'move')
+      : (mode === 'pan' ? 'grab' : 'crosshair');
+    return;
+  }
+  if (Math.hypot(cx - drag.sx, cy - drag.sy) > 4) drag.moved = true;
+  if (drag.move) {
+    const [wx, wy] = screenToWorld(cx, cy);
+    drag.move.p.x = wx; drag.move.p.y = wy;
+    autoYaws(); drawMap();
+    return;
+  }
   drag.cx = cx; drag.cy = cy;
   if (Math.hypot(cx - drag.sx, cy - drag.sy) > 8) drag.moved = true;
   if (!drag.place) { view.ox = drag.ox + cx - drag.sx; view.oy = drag.oy + cy - drag.sy; }
@@ -485,7 +532,13 @@ cv.addEventListener('pointermove', e => {
 cv.addEventListener('pointerup', () => {
   if (!drag) return;
   const d = drag; drag = null;
+  if (d.move) {
+    if (!d.moved) undoStack.pop();   // just a click on the point: nothing changed
+    renderRoute(); drawMap();
+    return;
+  }
   if (d.place) {
+    pushUndo();
     const [sx, sy] = worldToScreen(d.wx, d.wy);
     const p = {x: d.wx, y: d.wy, yaw: 0, auto: !d.moved};
     if (d.moved) p.yaw = Math.atan2(-(d.cy - sy), d.cx - sx);
@@ -508,22 +561,58 @@ cv.addEventListener('wheel', e => {
 /* ---------------------------------------------------------------- route editing */
 const deg = r => (r * 180 / Math.PI).toFixed(0) + '°';
 const fmt = p => `x ${p.x.toFixed(2)}, y ${p.y.toFixed(2)}, ${deg(p.yaw)}`;
+let undoStack = [];
+const snapshot = () => JSON.stringify(route);
+function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > 100) undoStack.shift(); }
+function undo() {
+  if (!undoStack.length) return toast('Nothing to undo');
+  route = JSON.parse(undoStack.pop()); renderRoute(); drawMap();
+}
+$('undoBtn').onclick = undo;
+addEventListener('keydown', e => {
+  if (e.target.closest && e.target.closest('input,select,textarea')) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
+}, true);
+const draftKey = () => map ? 'route.' + (map.live ? '__live__' : map.name) : null;
+function saveDraft() { const k = draftKey(); if (k) localSet(k, snapshot()); }
+function loadDraft() {
+  undoStack = [];
+  let r = null;
+  try { r = JSON.parse(localGet(draftKey()) || 'null'); } catch {}
+  route = r && Array.isArray(r.waypoints) ? r : {start: null, waypoints: [], end: null};
+  renderRoute();
+}
 function renderRoute() {
   const ol = $('pts'); ol.innerHTML = '';
-  const add = (label, p, onDel) => {
+  const btn = (txt, title, fn, disabled) => {
+    const b = document.createElement('button'); b.textContent = txt; b.title = title; b.disabled = !!disabled;
+    b.onclick = () => { pushUndo(); fn(); autoYaws(); renderRoute(); drawMap(); };
+    return b;
+  };
+  const add = (label, p, onDel, i) => {
     const li = document.createElement('li');
     li.innerHTML = `<span><b>${label}</b> <span class="muted">${fmt(p)}</span></span>`;
-    const b = document.createElement('button'); b.textContent = '✕'; b.title = 'remove';
-    b.onclick = () => { onDel(); autoYaws(); renderRoute(); drawMap(); };
-    li.appendChild(b); ol.appendChild(li);
+    const acts = document.createElement('span'); acts.className = 'acts';
+    if (i !== undefined) {
+      const w = route.waypoints, swap = (a, b) => { [w[a], w[b]] = [w[b], w[a]]; };
+      acts.append(btn('↑', 'move earlier', () => swap(i, i - 1), i === 0),
+                  btn('↓', 'move later', () => swap(i, i + 1), i === w.length - 1));
+    }
+    acts.append(btn('✕', 'delete', onDel));
+    li.appendChild(acts); ol.appendChild(li);
   };
   if (route.start) add('Start', route.start, () => route.start = null);
-  route.waypoints.forEach((p, i) => add(`Waypoint ${i + 1}`, p, () => route.waypoints.splice(i, 1)));
+  route.waypoints.forEach((p, i) => add(`Waypoint ${i + 1}`, p, () => route.waypoints.splice(i, 1), i));
   if (route.end) add('End', route.end, () => route.end = null);
   $('noPts').hidden = !!routePoints().length;
   $('goBtn').disabled = !(route.start && route.end);
+  saveDraft();
 }
-$('clearBtn').onclick = () => { route = {start: null, waypoints: [], end: null}; renderRoute(); drawMap(); };
+$('clearBtn').onclick = () => {
+  if (!routePoints().length) return;
+  pushUndo(); route = {start: null, waypoints: [], end: null}; renderRoute(); drawMap();
+  toast('Route cleared (Undo brings it back)');
+};
 const plain = p => p && {x: p.x, y: p.y, yaw: p.yaw};
 const routeBody = () => ({start: plain(route.start), end: plain(route.end), waypoints: route.waypoints.map(plain)});
 
@@ -564,6 +653,7 @@ function renderRoutes(routes) {
     const btns = document.createElement('span'); btns.className = 'row';
     const load = document.createElement('button'); load.textContent = 'Load';
     load.onclick = () => {
+      pushUndo();
       route = {start: {...r.start}, end: {...r.end}, waypoints: r.waypoints.map(p => ({...p}))};
       $('routeName').value = n; renderRoute(); drawMap();
     };
@@ -617,8 +707,9 @@ function loadLive(meta) {
 }
 async function selectMap(name) {
   if (name === LIVE) {
-    localSet('map', LIVE); route = {start: null, waypoints: [], end: null}; renderRoute();
+    localSet('map', LIVE);
     $('empty').hidden = true; map = {name: LIVE, live: true, stamp: -1}; img = null;
+    loadDraft();
     renderRoutes(null);
     const lm = lastState && lastState.live_map;
     if (lm) loadLive(lm);
@@ -627,7 +718,7 @@ async function selectMap(name) {
   }
   $('empty').hidden = true;
   map = maps.find(m => m.name === name); localSet('map', name);
-  route = {start: null, waypoints: [], end: null}; renderRoute();
+  loadDraft();
   img = new Image();
   img.onload = () => { fit(); };
   img.src = `/api/maps/${encodeURIComponent(name)}/image?t=${map.modified}`;
