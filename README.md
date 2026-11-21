@@ -416,7 +416,7 @@ ros2 launch rover_dashboard dashboard.launch.py   # http://<pi-ip>:8080
 * **Maps**: lists `~/maps` (`.yaml` + `.pgm`), zoom / pan; **Save live map** saves the current SLAM map (image + pose graph).
 * **Autonomous mapping**: explorer state, Start / Stop (with optional map name), Localize now, localization fit; **● Live SLAM map** with explorer boundary and path overlays. Manual driving stops the explorer.
 * **Editing waypoints**: drag any start / waypoint / end marker to move it; **right-click** a marker (or pick *Delete point* and click it) to delete it; in the *Current route* list, ↑ ↓ reorder waypoints and ✕ deletes; **Undo** / Ctrl+Z reverts the last change (Clear and Load too). The route being edited is kept per map in the browser, so a page reload doesn't lose it.
-* **Routes**: *Set start*, *Add waypoint*, *Set end* by clicking on the map (drag to set heading); save named routes per map (`~/maps/<map>.routes.json`); **Go** publishes the start as `/initialpose`, loads the map into `map_server` if running, publishes the route on `/rover/route` (`nav_msgs/Path`) and sends it to Nav2 `navigate_through_poses` if Nav2 is running. **Cancel / stop** cancels navigation and stops the rover.
+* **Routes**: *Set start*, *Add waypoint*, *Set end* by clicking on the map (drag to set heading); save named routes per map (`~/maps/<map>.routes.json`). While you edit, the map shows the **path around walls** the rover will actually drive (bold blue; the straight lines stay faint). Legs with no way through are drawn red with the reason (point inside a wall, walled off, gap narrower than the rover, outside the map), and points too close to a wall are moved to the nearest free spot. **Go** publishes the start as `/initialpose`, loads the map into `map_server` if running, publishes the route on `/rover/route` and sends it to Nav2 `navigate_through_poses` if Nav2 is running, otherwise to `route_follower`, which drives it. The navigation status shows the follower's progress. **Cancel / stop** stops either one.
 
 Config: `config/dashboard.yaml` (`host`, `port`, `maps_dir`, frames). Uses only the Python standard library for HTTP. **There is no login** - anyone on the network can drive the rover; set `host: 127.0.0.1` and use an SSH tunnel on untrusted networks.
 
@@ -434,7 +434,28 @@ JSON API (used by the page): `GET /api/state`, `POST /api/cmd {"c":"w"}`, `GET /
 | `localization.launch.py map:=<name>` | lidar + `laser_odometry` + slam_toolbox (localization on `~/maps/<name>.posegraph`) + `global_localizer` (auto initial pose, auto recovery) |
 | `... sim:=true [world:=<map.yaml>] [start:=x,y,yaw]` | replaces the lidar with `rover_sim` |
 
+Both launch files also start `route_follower`, which drives dashboard routes.
+
 Other arguments: `maps_dir` (default `~/maps`), `map_name` (name used when the explorer saves).
+
+#### `route_follower` - drive a route around walls (no Nav2 needed)
+
+Takes the dashboard route (start → waypoints → end) on `/route_follower/route`. Each leg is planned on `/map` with `route_planning.py`, the same planner as the dashboard preview:
+* cells closer than `robot_radius` + 5 cm to a wall are blocked;
+* cells near walls cost extra, so the path keeps to the middle of gaps;
+* unscanned speckle inside scanned floor counts as free, while larger unknown areas are allowed but avoided;
+* the grid path is straightened into lines between corners.
+
+The leg is re-planned every 3 s as the map fills in and driven with discrete w/a/s/d like the explorer. At the end the rover turns to the End arrow.
+
+It handles trouble as follows:
+* If something is in front (lidar, or the ToF obstacle flag), it stops. If the way is still blocked after 3 s, it backs up and re-plans.
+* A ToF cliff makes it back off.
+* If it is stuck for 8 s, it backs up and re-plans.
+* It gives up (state `FAILED`) after repeated failures or a per-leg timeout.
+* A point next to a wall counts as reached once the rover is as close as it can get.
+
+`robot_radius`, `lin_speed`, `ang_speed`, `goal_tolerance` and `use_tof` come from `explorer.yaml`, so `--motion --apply` tunes both nodes. Topics: `/route_follower/state` (JSON), `/route_follower/path`. Service: `/route_follower/cancel`.
 
 #### `laser_odometry` - odometry without wheel encoders
 
@@ -511,7 +532,7 @@ ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGrap
 | `/scan` | `sensor_msgs/LaserScan` | lidar / sim → odometry, SLAM, localizer, explorer |
 | `/odom` | `nav_msgs/Odometry` | `laser_odometry` |
 | `/map` | `nav_msgs/OccupancyGrid` | slam_toolbox → explorer, localizer |
-| `/cmd_vel` | `geometry_msgs/Twist` | explorer (or Nav2) → bridge |
+| `/cmd_vel` | `geometry_msgs/Twist` | explorer, route_follower (or Nav2) → bridge |
 | `/rover/cmd` | `std_msgs/String` | teleop, dashboard → bridge |
 | `/rover/sent`, `/rover/esp32_rx` | `std_msgs/String` | bridge → dashboard, teleop |
 | `/imu` | `sensor_msgs/Imu` | bridge |
@@ -519,8 +540,10 @@ ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGrap
 | `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | localizer, dashboard → slam_toolbox |
 | `/localization/score`, `/localization/status` | `Float32`, `String` (JSON) | global_localizer |
 | `/explorer/state`, `/explorer/path`, `/explorer/boundary` | `String` (JSON), `nav_msgs/Path` | explorer |
-| `/rover/route` | `nav_msgs/Path` | dashboard |
-| `/tof/calibrate_floor`, `/localization/global_localize`, `/explorer/start`, `/explorer/stop` | `std_srvs/Trigger` | services |
+| `/rover/route` | `nav_msgs/Path` | dashboard (every Go, for logging / other tools) |
+| `/route_follower/route` | `nav_msgs/Path` | dashboard → route_follower (when Nav2 is not running) |
+| `/route_follower/state`, `/route_follower/path` | `String` (JSON), `nav_msgs/Path` | route_follower → dashboard |
+| `/tof/calibrate_floor`, `/localization/global_localize`, `/explorer/start`, `/explorer/stop`, `/route_follower/cancel` | `std_srvs/Trigger` | services |
 
 TF tree: `map → odom` (slam_toolbox) → `base_link` (laser_odometry) → `laser_frame` (static, z = 0.02 m, from the ydlidar launch). ToF points are computed directly in `base_link` from the configured mount geometry.
 

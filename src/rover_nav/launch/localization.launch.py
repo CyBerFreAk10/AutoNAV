@@ -31,6 +31,7 @@ def setup(context):
                                {'mode': 'localization', 'map_file_name': base,
                                 'map_start_pose': [0.0, 0.0, 0.0]}, localization=True))
     actions.append(common.localizer(mode='initialpose', auto_start=True))
+    actions.append(common.route_follower())     # dashboard routes: Go drives around walls
     return actions
 
 

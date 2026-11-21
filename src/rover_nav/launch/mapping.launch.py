@@ -28,6 +28,7 @@ def setup(context):
     actions.append(common.slam(os.path.join(common.CFG, 'slam_mapping.yaml'), {'mode': 'mapping'}))
     actions.append(common.explorer(autostart=common.as_bool(a['explore']), maps_dir=maps_dir,
                                    map_name=a['map_name'], use_tof=common.as_bool(a['use_tof'])))
+    actions.append(common.route_follower(use_tof=common.as_bool(a['use_tof'])))
     if a['continue_map']:
         base = os.path.join(maps_dir, a['continue_map'])
         for ext in ('.yaml', '.posegraph'):

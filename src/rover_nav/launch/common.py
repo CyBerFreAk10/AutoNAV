@@ -70,5 +70,15 @@ def explorer(**params):
                 parameters=[os.path.join(CFG, 'explorer.yaml'), params])
 
 
+def route_follower(**params):
+    """Drives dashboard routes around walls. Shares robot size + speeds with the explorer."""
+    with open(os.path.join(CFG, 'explorer.yaml')) as f:
+        ex = yaml.safe_load(f)['explorer']['ros__parameters']
+    shared = {k: ex[k] for k in ('robot_radius', 'lin_speed', 'ang_speed', 'discrete_drive',
+                                 'control_hz', 'goal_tolerance', 'use_tof') if k in ex}
+    return Node(package='rover_nav', executable='route_follower', name='route_follower',
+                output='screen', parameters=[{**shared, **params}])
+
+
 def as_bool(v):
     return str(v).lower() in ('1', 'true', 'yes', 'on')

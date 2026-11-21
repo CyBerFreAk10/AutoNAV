@@ -26,6 +26,7 @@ header h1{font-size:16px;margin:0 8px 0 0}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;
   background:var(--btn);font-size:12px;white-space:nowrap}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--idle)}
+p.bad{color:var(--bad)}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
 main{display:grid;grid-template-columns:340px 1fr;gap:16px;padding:16px;max-width:1600px;margin:0 auto}
 @media (max-width:900px){main{grid-template-columns:1fr;padding:12px 16px}}
@@ -194,6 +195,7 @@ ol.pts li .acts{display:flex;gap:4px;flex-shrink:0}
       <h2>Current route</h2>
       <ol class="pts" id="pts"></ol>
       <p class="small muted" id="noPts">Pick “Set start”, then click on the map. Drag while clicking to set the heading.</p>
+      <p id="planInfo" class="small muted" style="white-space:pre-line"></p>
       <p class="small muted">Drag a point to move it · right-click it (or use “Delete point”) to remove it · Ctrl+Z undoes.</p>
       <div class="row" style="margin-top:10px">
         <input id="routeName" placeholder="route name" size="14">
@@ -326,7 +328,10 @@ function renderState(s) {
   if (rx.length) $('rx').textContent = rx.map(r => `${r[0]}  ${r[1]}`).join('\n');
   const up = s.uptime; $('v-up').textContent = `${Math.floor(up / 3600)}h ${Math.floor(up / 60) % 60}m ${up % 60}s`;
   const nav = s.nav;
-  $('v-nav').textContent = nav.state + (nav.route ? ` · ${nav.route}` : '') + (nav.detail ? ` · ${nav.detail}` : '');
+  const fol = s.follower && Date.now() / 1000 - s.follower.stamp < 3 ? s.follower : null;
+  $('v-nav').textContent = fol && fol.state !== 'IDLE'
+    ? `${fol.state.toLowerCase()}${nav.route ? ' · ' + nav.route : ''}${fol.info ? ' · ' + fol.info : ''}`
+    : nav.state + (nav.route ? ` · ${nav.route}` : '') + (nav.detail ? ` · ${nav.detail}` : '');
   $('v-nn').textContent = s.nodes.length; $('nodes').textContent = s.nodes.join('\n');
   const ex = s.explorer, exLive = ex && (Date.now() / 1000 - ex.stamp) < 3;
   $('v-ex').textContent = !exLive ? 'not running' :
@@ -413,11 +418,26 @@ function drawMap() {
   // origin
   const [o0, o1] = worldToScreen(0, 0);
   arrow(o0, o1, 0, 18, '#d64545', 1.5); arrow(o0, o1, Math.PI / 2, 18, '#1f9d55', 1.5);
-  // route line
+  // route: straight lines faint, the planned path around walls bold (red where no path)
   const pts = routePoints();
+  const planned = plan && plan.key === snapshot() && !drag ? plan : null;
   if (pts.length > 1) {
-    ctx.setLineDash([6, 5]); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath();
+    ctx.setLineDash([6, 5]); ctx.strokeStyle = css('--accent'); ctx.lineWidth = planned ? 1 : 2;
+    ctx.globalAlpha = planned ? 0.35 : 1; ctx.beginPath();
     pts.forEach((p, i) => { const [x, y] = worldToScreen(p.x, p.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+  if (planned) planned.legs.forEach(lg => {
+    ctx.setLineDash(lg.ok ? [] : [4, 4]); ctx.lineWidth = lg.ok ? 3 : 2.5;
+    ctx.strokeStyle = lg.ok ? '#2f6fde' : '#d64545'; ctx.beginPath();
+    lg.path.forEach((p, i) => { const [x, y] = worldToScreen(p[0], p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]);
+  });
+  // what the route follower is actually driving
+  const fp = lastState && lastState.follower_path, fs = lastState && lastState.follower;
+  if (fp && fp.length > 1 && fs && !['IDLE', 'DONE', 'STOPPED', 'FAILED'].includes(fs.state)) {
+    ctx.strokeStyle = '#f0a63a'; ctx.lineWidth = 2.5; ctx.setLineDash([2, 4]); ctx.beginPath();
+    fp.forEach((p, i) => { const [x, y] = worldToScreen(p[0], p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.stroke(); ctx.setLineDash([]);
   }
   if (map.live && lastState) {
@@ -607,6 +627,40 @@ function renderRoute() {
   $('noPts').hidden = !!routePoints().length;
   $('goBtn').disabled = !(route.start && route.end);
   saveDraft();
+  schedulePlan();
+  renderPlanInfo();
+}
+
+/* path preview: the server plans each leg around walls (same planner the rover drives with) */
+let plan = null, planTimer = null, planSeq = 0;
+function schedulePlan() {
+  clearTimeout(planTimer);
+  if (!map || routePoints().length < 2) { plan = null; renderPlanInfo(); drawMap(); return; }
+  planTimer = setTimeout(requestPlan, 200);
+}
+async function requestPlan() {
+  const key = snapshot(), seq = ++planSeq;
+  try {
+    const r = await api('plan', {method: 'POST', body: {map: map.live ? null : map.name, route: routeBody()}});
+    if (seq !== planSeq) return;              // a newer edit is already being planned
+    plan = {...r, key};
+  } catch (e) { if (seq === planSeq) plan = {key, error: e.message, legs: []}; }
+  renderPlanInfo(); drawMap();
+}
+function renderPlanInfo() {
+  const el = $('planInfo');
+  if (!plan || plan.key !== snapshot()) { el.textContent = ''; el.className = 'small muted'; return; }
+  if (plan.error) { el.textContent = `Path preview unavailable: ${plan.error}`; el.className = 'small muted'; return; }
+  const names = [...(route.start ? ['Start'] : []), ...route.waypoints.map((_, i) => `waypoint ${i + 1}`),
+                 ...(route.end ? ['End'] : [])];
+  const lines = [];
+  plan.legs.forEach((lg, i) => {
+    if (!lg.ok) lines.push(`✕ ${names[i]} → ${names[i + 1]}: ${lg.note}`);
+    else if (lg.note) lines.push(`• ${names[i + 1]}: ${lg.note}`);
+  });
+  el.className = 'small' + (plan.ok ? '' : ' bad');
+  el.textContent = (plan.ok ? `Path around walls: ${plan.length.toFixed(1)} m` : 'Some legs have no path:') +
+    (lines.length ? '\n' + lines.join('\n') : '');
 }
 $('clearBtn').onclick = () => {
   if (!routePoints().length) return;

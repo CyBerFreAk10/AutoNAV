@@ -119,7 +119,10 @@ class Planner:
     NB = [(-1, -1, 1.414), (-1, 0, 1.0), (-1, 1, 1.414), (0, -1, 1.0),
           (0, 1, 1.0), (1, -1, 1.414), (1, 0, 1.0), (1, 1, 1.414)]
 
-    def __init__(self, grid, inflate, plan_res=0.1, wall_cost_dist=0.4, unknown_ok=False):
+    def __init__(self, grid, inflate, plan_res=0.1, wall_cost_dist=0.4, unknown_ok=False,
+                 unknown_cost=0.0):
+        """unknown_ok: unknown cells are passable; unknown_cost: extra cost per unknown cell
+        (so paths prefer mapped free space but can still cross speckled / unscanned bits)."""
         self.grid = grid
         f = max(1, int(round(plan_res / grid.res)))
         self.f = f
@@ -132,6 +135,11 @@ class Planner:
         self.dist = dmin
         self.blocked = dmin < inflate
         self.cost = 1.0 + 4.0 * np.clip((wall_cost_dist - dmin) / wall_cost_dist, 0, 1)
+        self.unknown = np.zeros_like(self.blocked)
+        if unknown_ok and unknown_cost > 0:
+            unk = grid.unknown[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3)) > 0.5
+            self.unknown = unk
+            self.cost = self.cost + unknown_cost * unk
         self.H, self.W = self.blocked.shape
 
     def cell(self, x, y):

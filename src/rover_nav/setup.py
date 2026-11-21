@@ -23,5 +23,6 @@ setup(
         'global_localizer = rover_nav.global_localizer:main',
         'explorer = rover_nav.explorer:main',
         'rover_sim = rover_nav.sim:main',
+        'route_follower = rover_nav.route_follower:main',
     ]},
 )

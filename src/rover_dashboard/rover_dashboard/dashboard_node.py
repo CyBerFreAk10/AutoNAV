@@ -13,6 +13,7 @@ API
   DELETE /api/maps/<m>/routes/<r>
   POST /api/maps/<m>/go    {"route"|"name", "set_initial_pose", "load_map"}
   POST /api/nav/cancel
+  POST /api/plan           {"map": name|null, "route"}   path around walls for each leg (preview)
   POST /api/maps/save      {"name"}       save the live /map with nav2 map_saver_cli
   GET  /api/live/image                    live SLAM /map as PNG (meta is in /api/state)
   POST /api/explorer/start {"name"}       start autonomous mapping (optional map name)
@@ -84,6 +85,8 @@ class Dashboard(Node):
             'live_map': None,          # meta of the latest /map
             'explorer_path': [],
             'explorer_boundary': [],
+            'follower': None,          # last /route_follower/state JSON
+            'follower_path': [],
         }
         self.live_msg = None
         self._live_png = (None, None)
@@ -118,6 +121,10 @@ class Dashboard(Node):
                                  map_qos)
         self.create_subscription(Path, 'explorer/boundary',
                                  lambda m: self._on_path('explorer_boundary', m), map_qos)
+        self.create_subscription(String, 'route_follower/state', self._on_follower, 10)
+        self.create_subscription(Path, 'route_follower/path',
+                                 lambda m: self._on_path('follower_path', m), map_qos)
+        self.cli_follower_cancel = self.create_client(Trigger, 'route_follower/cancel')
         self.cli_explore_start = self.create_client(Trigger, 'explorer/start')
         self.cli_explore_stop = self.create_client(Trigger, 'explorer/stop')
         self.cli_localize = self.create_client(Trigger, 'localization/global_localize')
@@ -127,6 +134,8 @@ class Dashboard(Node):
         self.pub_init = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_route = self.create_publisher(Path, 'rover/route', latched)
+        self.pub_follow = self.create_publisher(Path, 'route_follower/route', latched)
+        self._plan_cache = {}
 
         self.nav_client = ActionClient(self, NavigateThroughPoses, 'navigate_through_poses')
         self.load_map_client = self.create_client(LoadMap, 'map_server/load_map')
@@ -202,6 +211,50 @@ class Dashboard(Node):
         if not fut.done():
             raise RuntimeError(f'{what} did not answer')
         return fut.result()
+
+    def _on_follower(self, msg):
+        try:
+            st = json.loads(msg.data)
+        except ValueError:
+            return
+        st['stamp'] = time.time()
+        with self.lock:
+            self.s['follower'] = st
+
+    # ------------------------------------------------------------------ path preview
+    def _robot_radius(self):
+        try:
+            with open(os.path.join(get_package_share_directory('rover_nav'), 'config',
+                                   'explorer.yaml')) as f:
+                return float(yaml.safe_load(f)['explorer']['ros__parameters']['robot_radius'])
+        except Exception:
+            return 0.15
+
+    def plan(self, map_name, route):
+        """Plan start -> waypoints -> end around walls on a saved map (or the live map)."""
+        from rover_nav.grid_utils import GridMap
+        from rover_nav.route_planning import make_planner, plan_route
+        pts = [route.get('start')] + list(route.get('waypoints') or []) + [route.get('end')]
+        pts = [(float(p['x']), float(p['y'])) for p in pts if p]
+        if len(pts) < 2:
+            return {'ok': True, 'legs': [], 'length': 0.0}
+        radius = self._robot_radius()
+        if map_name:
+            info = self.map_info(map_name)
+            key = (info['yaml'], info['modified'], radius)
+        else:
+            msg = self.live_msg
+            if msg is None:
+                raise RuntimeError('no live map yet')
+            key = ('live', id(msg), radius)
+        cached = self._plan_cache.get(key)
+        if cached is None:
+            grid = GridMap.from_yaml(info['yaml']) if map_name else GridMap.from_msg(msg)
+            cached = make_planner(grid, radius)
+            self._plan_cache = {key: cached}       # keep only the latest map's planner
+        out = plan_route(None, pts, radius, planner=cached)
+        out['robot_radius'] = radius
+        return out
 
     def explorer_start(self, name=''):
         if name:
@@ -422,6 +475,9 @@ class Dashboard(Node):
         steps.append(f'route published to /rover/route ({len(path.poses)} poses)')
 
         nav = {'route': rname, 'map': map_name or 'live SLAM map'}
+        if self.exploring():
+            self.explorer_stop()
+            steps.append('autonomous mapping stopped')
         if self.nav_client.server_is_ready():
             goal = NavigateThroughPoses.Goal()
             goal.poses = poses
@@ -429,9 +485,14 @@ class Dashboard(Node):
             fut.add_done_callback(self._nav_accepted)
             nav.update(state='sending', detail='goal sent to Nav2')
             steps.append('goal sent to Nav2 navigate_through_poses')
+        elif self.count_subscribers('route_follower/route') > 0:
+            self.pub_follow.publish(path)
+            nav.update(state='follower', detail='route follower driving (around walls)')
+            steps.append('route follower is driving it, around walls')
         else:
-            nav.update(state='published', detail='Nav2 not running - route published only')
-            steps.append('Nav2 not running: nothing will drive yet')
+            nav.update(state='published', detail='no Nav2 and no route_follower - nothing drives')
+            steps.append('neither Nav2 nor route_follower is running: nothing will drive '
+                         '(start the stack with field_test.sh or a rover_nav launch)')
         with self.lock:
             self.s['nav'] = {**self.s['nav'], **nav}
         return steps
@@ -462,6 +523,17 @@ class Dashboard(Node):
 
     def cancel(self):
         self.drive('x')
+        if self.count_subscribers('route_follower/route') > 0:
+            empty = Path()
+            empty.header.frame_id = self.map_frame
+            empty.header.stamp = self.get_clock().now().to_msg()
+            self.pub_follow.publish(empty)      # an empty route stops the follower
+            with self.lock:
+                following = bool(self.s['follower'] and self.s['follower'].get('state')
+                                 not in ('IDLE', 'DONE', 'STOPPED', 'FAILED'))
+            if following and self.goal_handle is None:
+                self._set_nav('idle', 'route cancelled')
+                return 'route follower stopped'
         if self.goal_handle is not None:
             self.goal_handle.cancel_goal_async()
             self._set_nav('canceling', '')
@@ -529,6 +601,9 @@ def make_handler(node, web_dir):
                     if not b.get('route'):
                         return self._send(400, {'error': 'no route'})
                     return self._send(200, {'steps': node.go(None, b['route'], b.get('name') or '(unsaved)')})
+                if method == 'POST' and api == ['plan']:
+                    b = self._body()
+                    return self._send(200, node.plan(b.get('map') or None, b.get('route') or {}))
                 if method == 'POST' and api == ['nav', 'cancel']:
                     return self._send(200, {'result': node.cancel()})
                 if len(api) >= 3 and api[0] == 'maps':
